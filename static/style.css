@@ -1,0 +1,167 @@
+:root {
+  --bg: #0b0f14;
+  --surface: #121820;
+  --border: #232c38;
+  --text: #e6edf3;
+  --muted: #8b98a5;
+  --accent: #4fd1c5;
+  --accent-dark: #2f9e93;
+  --danger: #ff6b6b;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.25rem 2rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.site-header nav a {
+  color: var(--muted);
+  text-decoration: none;
+  margin-left: 1.5rem;
+  font-size: 0.95rem;
+}
+
+.site-header nav a:hover { color: var(--text); }
+
+main {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem;
+}
+
+.btn {
+  display: inline-block;
+  padding: 0.65rem 1.25rem;
+  border-radius: 8px;
+  text-decoration: none;
+  font-weight: 600;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.btn-primary { background: var(--accent); color: #06201d; }
+.btn-primary:hover { background: var(--accent-dark); }
+.btn-ghost { background: transparent; border-color: var(--border); color: var(--text); }
+.btn-small { padding: 0.4rem 0.9rem; font-size: 0.85rem; }
+
+.hero { text-align: center; padding: 2rem 0 3rem; }
+.hero h1 { font-size: 2.25rem; margin-bottom: 1rem; }
+.lede { color: var(--muted); font-size: 1.1rem; max-width: 640px; margin: 0 auto 1.5rem; }
+
+.example {
+  margin: 1.5rem auto;
+  max-width: 560px;
+  padding: 1rem 1.25rem;
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  color: var(--text);
+  font-style: italic;
+  text-align: left;
+  border-radius: 0 8px 8px 0;
+}
+
+.cta-row { display: flex; gap: 1rem; justify-content: center; margin-top: 1.5rem; }
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1.5rem;
+  margin: 3rem 0;
+}
+
+.feature {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+}
+
+.feature h3 { margin-top: 0; font-size: 1rem; }
+.feature p { color: var(--muted); font-size: 0.9rem; margin-bottom: 0; }
+
+.status-note {
+  text-align: center;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  padding-top: 1.5rem;
+}
+
+.auth-form, .pricing, .dashboard { max-width: 400px; margin: 0 auto; }
+.pricing { max-width: 480px; text-align: center; }
+
+.auth-form form { display: flex; flex-direction: column; gap: 1rem; margin-top: 1.5rem; }
+.auth-form label { display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.9rem; color: var(--muted); }
+
+input {
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.error { color: var(--danger); font-size: 0.9rem; }
+.muted { color: var(--muted); font-size: 0.9rem; }
+
+.plan-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2rem;
+  margin-top: 1.5rem;
+}
+
+.plan-card .price { font-size: 2.5rem; font-weight: 700; margin: 0.5rem 0 1.5rem; }
+.plan-card .price span { font-size: 1rem; color: var(--muted); font-weight: 400; }
+.plan-card ul { list-style: none; padding: 0; margin: 0 0 1.5rem; text-align: left; }
+.plan-card li { padding: 0.4rem 0; color: var(--muted); }
+.plan-card li::before { content: "✓ "; color: var(--accent); }
+.plan-card form { display: inline; }
+
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.badge-active { background: rgba(79, 209, 197, 0.15); color: var(--accent); }
+
+.placeholder-card {
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 1.5rem;
+  margin: 1.5rem 0;
+}
+
+.site-footer {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  padding: 2rem 1rem;
+  border-top: 1px solid var(--border);
+}

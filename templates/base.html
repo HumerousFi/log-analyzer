@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Sentinel Log Analyzer{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/">🛡️ Sentinel</a>
+    <nav>
+      <a href="/pricing">Pricing</a>
+      {% if user %}
+        <a href="/dashboard">Dashboard</a>
+        <a href="/logout">Log out</a>
+      {% else %}
+        <a href="/login">Log in</a>
+        <a class="btn btn-small" href="/signup">Get started</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <span>&copy; 2026 Sentinel. Security log analysis for small companies.</span>
+  </footer>
+</body>
+</html>

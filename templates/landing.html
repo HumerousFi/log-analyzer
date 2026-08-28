@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Sentinel — A security analyst in a box{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>A security analyst in a box for your logs.</h1>
+  <p class="lede">
+    Upload your Linux auth logs, Apache/Nginx logs, firewall logs, or Windows
+    event exports. Sentinel finds brute-force attacks, suspicious IPs,
+    unusual login times, scanning activity, web attacks, and privilege
+    escalation attempts — and explains them in plain English.
+  </p>
+  <blockquote class="example">
+    “Your server received 4,281 SSH authentication attempts. This IP
+    attempted 37 usernames.”
+  </blockquote>
+  <div class="cta-row">
+    <a class="btn btn-primary" href="/signup">Get started</a>
+    <a class="btn btn-ghost" href="/pricing">See pricing</a>
+  </div>
+</section>
+
+<section class="features">
+  <div class="feature"><h3>Brute-force detection</h3><p>Repeated failed logins, credential stuffing, and username enumeration.</p></div>
+  <div class="feature"><h3>Suspicious IPs</h3><p>Flags IPs behaving abnormally across your logs.</p></div>
+  <div class="feature"><h3>Scanning activity</h3><p>Port and path scanning patterns from web and firewall logs.</p></div>
+  <div class="feature"><h3>Plain-English reports</h3><p>No SIEM expertise required — just answers.</p></div>
+</section>
+
+<section class="status-note">
+  <p>🚧 The analysis engine is actively being built out. Sign up now to lock in early pricing.</p>
+</section>
+{% endblock %}

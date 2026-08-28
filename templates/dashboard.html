@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Sentinel{% endblock %}
+{% block content %}
+<section class="dashboard">
+  <h1>Welcome, {{ user.email }}</h1>
+  <p class="badge badge-active">Subscription active</p>
+
+  <div class="placeholder-card">
+    <h2>📊 Log analyzer</h2>
+    <p>
+      The upload &amp; analysis interface is coming soon. Your subscription
+      is already active, so you'll get access the moment it ships — no
+      action needed.
+    </p>
+  </div>
+
+  <p class="muted"><a href="/billing/portal">Manage billing</a></p>
+</section>
+{% endblock %}

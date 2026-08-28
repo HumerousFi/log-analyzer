@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Pricing — Sentinel{% endblock %}
+{% block content %}
+<section class="pricing">
+  <h1>Simple pricing</h1>
+  <p class="lede">One plan. Cancel anytime.</p>
+
+  <div class="plan-card">
+    <h2>Sentinel Monthly</h2>
+    <p class="price">$49<span>/month</span></p>
+    <ul>
+      <li>Unlimited log uploads</li>
+      <li>Brute-force &amp; scanning detection</li>
+      <li>Plain-English incident summaries</li>
+      <li>Email support</li>
+    </ul>
+
+    {% if subscribed %}
+      <a class="btn btn-primary" href="/dashboard">Go to dashboard</a>
+      <a class="btn btn-ghost" href="/billing/portal">Manage billing</a>
+    {% elif user %}
+      <form method="post" action="/billing/checkout">
+        <button class="btn btn-primary" type="submit">Subscribe</button>
+      </form>
+    {% else %}
+      <a class="btn btn-primary" href="/signup">Sign up to subscribe</a>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}
