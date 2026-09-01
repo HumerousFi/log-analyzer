@@ -1,7 +1,7 @@
 import datetime
 import os
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, create_engine
+from sqlalchemy import DateTime, ForeignKey, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./app.db")
@@ -37,18 +37,23 @@ class Subscription(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True)
-    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    stripe_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Prepaid one-time-charge access (Razorpay Orders), not a recurring
+    # Razorpay Subscription — see billing.py for why.
+    razorpay_order_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    credited_order_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="none")
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    current_period_end: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow
     )
 
     user: Mapped["User"] = relationship(back_populates="subscription")
 
-
-ACTIVE_STATUSES = {"active", "trialing"}
+    @property
+    def is_active(self) -> bool:
+        return bool(
+            self.current_period_end and self.current_period_end > datetime.datetime.utcnow()
+        )
 
 
 def init_db() -> None:

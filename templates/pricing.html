@@ -3,11 +3,11 @@
 {% block content %}
 <section class="pricing">
   <h1>Simple pricing</h1>
-  <p class="lede">One plan. Cancel anytime.</p>
+  <p class="lede">One plan. 30 days of access per purchase, renew anytime.</p>
 
   <div class="plan-card">
-    <h2>Sentinel Monthly</h2>
-    <p class="price">$49<span>/month</span></p>
+    <h2>Sentinel</h2>
+    <p class="price">₹4,900<span>/30 days</span></p>
     <ul>
       <li>Unlimited log uploads</li>
       <li>Brute-force &amp; scanning detection</li>
@@ -16,8 +16,14 @@
     </ul>
 
     {% if subscribed %}
+      <p class="muted">
+        Access active until
+        {{ user.subscription.current_period_end.strftime('%d %b %Y') }}.
+      </p>
       <a class="btn btn-primary" href="/dashboard">Go to dashboard</a>
-      <a class="btn btn-ghost" href="/billing/portal">Manage billing</a>
+      <form method="post" action="/billing/checkout">
+        <button class="btn btn-ghost" type="submit">Extend another 30 days</button>
+      </form>
     {% elif user %}
       <form method="post" action="/billing/checkout">
         <button class="btn btn-primary" type="submit">Subscribe</button>

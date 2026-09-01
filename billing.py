@@ -1,150 +1,155 @@
+import datetime
+import hashlib
+import hmac
 import os
 
-import stripe
-from fastapi import APIRouter, Depends, HTTPException, Request
+import razorpay
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
+from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
-from stripe import StripeClient
 
 from auth import require_user
-from db import ACTIVE_STATUSES, Subscription, User, get_db
+from db import Subscription, User, get_db
 
-STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
-STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")
 
+# Stopgap billing model: Razorpay Subscriptions requires the account's
+# Subscriptions product to be enabled, which is gated behind KYC/business
+# approval. Until that clears, access is sold as a flat prepaid charge via
+# the Orders API (works in test mode today) that grants a fixed number of
+# days of access. Swap this for real Razorpay Subscriptions once KYC clears.
+PLAN_AMOUNT_PAISE = 490000  # ₹4,900
+PLAN_PERIOD_DAYS = 30
+
 router = APIRouter(prefix="/billing")
+templates = Jinja2Templates(directory="templates")
 
-_client: StripeClient | None = None
+_client: razorpay.Client | None = None
 
 
-def get_client() -> StripeClient:
+def get_client() -> razorpay.Client:
     global _client
-    if not STRIPE_SECRET_KEY:
+    if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
         raise HTTPException(
             status_code=500,
-            detail="Stripe is not configured (STRIPE_SECRET_KEY missing).",
+            detail="Razorpay is not configured (RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET missing).",
         )
     if _client is None:
-        _client = StripeClient(api_key=STRIPE_SECRET_KEY)
+        _client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
     return _client
 
 
 def _get_or_create_subscription_row(db: Session, user: User) -> Subscription:
     if user.subscription is None:
-        sub = Subscription(user_id=user.id, status="none", is_active=False)
+        sub = Subscription(user_id=user.id, status="none")
         db.add(sub)
         db.commit()
         db.refresh(user)
     return user.subscription
 
 
-@router.post("/checkout")
-def create_checkout_session(
-    user: User = Depends(require_user), db: Session = Depends(get_db)
-):
-    if not STRIPE_PRICE_ID:
-        raise HTTPException(
-            status_code=500, detail="Stripe is not configured (STRIPE_PRICE_ID missing)."
-        )
+def _grant_access(sub_row: Subscription) -> None:
+    now = datetime.datetime.utcnow()
+    base = sub_row.current_period_end if sub_row.current_period_end and sub_row.current_period_end > now else now
+    sub_row.current_period_end = base + datetime.timedelta(days=PLAN_PERIOD_DAYS)
+    sub_row.status = "active"
 
+
+@router.post("/checkout")
+def start_checkout(
+    request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)
+):
     client = get_client()
     sub_row = _get_or_create_subscription_row(db, user)
 
-    session_params = {
-        "mode": "subscription",
-        "line_items": [{"price": STRIPE_PRICE_ID, "quantity": 1}],
-        "success_url": f"{APP_BASE_URL}/dashboard?checkout=success",
-        "cancel_url": f"{APP_BASE_URL}/pricing?checkout=cancel",
-        "client_reference_id": str(user.id),
-    }
-
-    if sub_row.stripe_customer_id:
-        session_params["customer"] = sub_row.stripe_customer_id
-    else:
-        session_params["customer_email"] = user.email
-
-    session = client.checkout.sessions.create(session_params)
-    return RedirectResponse(url=session.url, status_code=303)
-
-
-@router.get("/portal")
-def create_portal_session(
-    user: User = Depends(require_user), db: Session = Depends(get_db)
-):
-    sub_row = user.subscription
-    if sub_row is None or not sub_row.stripe_customer_id:
-        raise HTTPException(status_code=400, detail="No billing account on file yet.")
-
-    client = get_client()
-    portal_session = client.billing_portal.sessions.create(
-        {"customer": sub_row.stripe_customer_id, "return_url": f"{APP_BASE_URL}/dashboard"}
+    order = client.order.create(
+        {
+            "amount": PLAN_AMOUNT_PAISE,
+            "currency": "INR",
+            "payment_capture": 1,
+            "notes": {"user_id": str(user.id)},
+        }
     )
-    return RedirectResponse(url=portal_session.url, status_code=303)
 
-
-def _apply_subscription_state(db: Session, customer_id: str, stripe_subscription: dict) -> None:
-    sub_row = (
-        db.query(Subscription)
-        .filter(Subscription.stripe_customer_id == customer_id)
-        .first()
-    )
-    if sub_row is None:
-        return
-
-    status = stripe_subscription.get("status", "none")
-    sub_row.stripe_subscription_id = stripe_subscription.get("id")
-    sub_row.status = status
-    sub_row.is_active = status in ACTIVE_STATUSES
+    sub_row.razorpay_order_id = order["id"]
     db.commit()
+
+    return templates.TemplateResponse(
+        request,
+        "checkout.html",
+        {
+            "key_id": RAZORPAY_KEY_ID,
+            "order_id": order["id"],
+            "amount": PLAN_AMOUNT_PAISE,
+            "user_email": user.email,
+        },
+    )
+
+
+@router.post("/verify")
+def verify_checkout(
+    razorpay_payment_id: str = Form(...),
+    razorpay_order_id: str = Form(...),
+    razorpay_signature: str = Form(...),
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    if not RAZORPAY_KEY_SECRET:
+        raise HTTPException(status_code=500, detail="Razorpay is not configured.")
+
+    sub_row = user.subscription
+    if sub_row is None or sub_row.razorpay_order_id != razorpay_order_id:
+        raise HTTPException(status_code=400, detail="Order mismatch.")
+
+    payload = f"{razorpay_order_id}|{razorpay_payment_id}"
+    expected_signature = hmac.new(
+        RAZORPAY_KEY_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_signature, razorpay_signature):
+        raise HTTPException(status_code=400, detail="Invalid payment signature.")
+
+    if sub_row.credited_order_id != razorpay_order_id:
+        _grant_access(sub_row)
+        sub_row.credited_order_id = razorpay_order_id
+        db.commit()
+
+    return RedirectResponse(url="/dashboard?checkout=success", status_code=303)
 
 
 @router.post("/webhook")
-async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
-    if not STRIPE_WEBHOOK_SECRET:
+async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
+    if not RAZORPAY_WEBHOOK_SECRET:
         raise HTTPException(
-            status_code=500, detail="Stripe is not configured (STRIPE_WEBHOOK_SECRET missing)."
+            status_code=500, detail="Razorpay is not configured (RAZORPAY_WEBHOOK_SECRET missing)."
         )
 
     payload = await request.body()
-    sig_header = request.headers.get("stripe-signature", "")
+    sig_header = request.headers.get("x-razorpay-signature", "")
 
+    client = get_client()
     try:
-        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except (ValueError, stripe.SignatureVerificationError):
+        client.utility.verify_webhook_signature(
+            payload.decode("utf-8"), sig_header, RAZORPAY_WEBHOOK_SECRET
+        )
+    except razorpay.errors.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Invalid webhook signature.")
 
-    event_type = event["type"]
-    data = event["data"]["object"]
+    event = await request.json()
+    if event.get("event") == "payment.captured":
+        payment_entity = event.get("payload", {}).get("payment", {}).get("entity", {})
+        order_id = payment_entity.get("order_id")
 
-    if event_type == "checkout.session.completed":
-        if data.get("payment_status") == "unpaid":
-            return {"received": True}
-
-        user_id = data.get("client_reference_id")
-        customer_id = data.get("customer")
-        subscription_id = data.get("subscription")
-
-        if user_id and customer_id:
-            sub_row = (
-                db.query(Subscription)
-                .filter(Subscription.user_id == int(user_id))
-                .first()
-            )
-            if sub_row is not None:
-                sub_row.stripe_customer_id = customer_id
-                sub_row.stripe_subscription_id = subscription_id
-                sub_row.status = "active"
-                sub_row.is_active = True
-                db.commit()
-
-    elif event_type in (
-        "customer.subscription.updated",
-        "customer.subscription.deleted",
-    ):
-        customer_id = data.get("customer")
-        if customer_id:
-            _apply_subscription_state(db, customer_id, data)
+        sub_row = (
+            db.query(Subscription).filter(Subscription.razorpay_order_id == order_id).first()
+        )
+        if sub_row is not None and sub_row.credited_order_id != order_id:
+            _grant_access(sub_row)
+            sub_row.credited_order_id = order_id
+            db.commit()
 
     return {"received": True}

@@ -125,7 +125,7 @@ def signup_submit(
     db.add(user)
     db.flush()
 
-    db.add(Subscription(user_id=user.id, status="none", is_active=False))
+    db.add(Subscription(user_id=user.id, status="none"))
     db.commit()
     db.refresh(user)
 

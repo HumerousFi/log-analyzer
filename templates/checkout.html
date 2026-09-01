@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Checkout — Sentinel{% endblock %}
+{% block content %}
+<section class="checkout">
+  <h1>Redirecting to secure checkout…</h1>
+  <p class="muted">If nothing happens, <a href="/pricing">go back to pricing</a>.</p>
+</section>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script>
+  var options = {
+    key: "{{ key_id }}",
+    order_id: "{{ order_id }}",
+    amount: "{{ amount }}",
+    currency: "INR",
+    name: "Sentinel",
+    description: "Sentinel — 30 days access",
+    prefill: { email: "{{ user_email }}" },
+    theme: { color: "#4fd1c5" },
+    handler: function (response) {
+      var form = document.createElement("form");
+      form.method = "POST";
+      form.action = "/billing/verify";
+      ["razorpay_payment_id", "razorpay_subscription_id", "razorpay_signature"].forEach(function (key) {
+        var input = document.createElement("input");
+        input.type = "hidden";
+        input.name = key;
+        input.value = response[key];
+        form.appendChild(input);
+      });
+      document.body.appendChild(form);
+      form.submit();
+    },
+    modal: {
+      ondismiss: function () {
+        window.location.href = "/pricing?checkout=cancel";
+      }
+    }
+  };
+  var rzp = new Razorpay(options);
+  rzp.open();
+</script>
+{% endblock %}
