@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Sentinel is a security log analyzer SaaS **shell**: landing page, signup/login,
-Razorpay billing, and a gated dashboard, wrapped around an early analysis
-engine that is not yet wired up to the UI. The dashboard currently shows a
-"coming soon" placeholder instead of calling `/analyze`.
+Sentinel is a security log analyzer SaaS: landing page, signup/login,
+Razorpay billing, a gated dashboard, and a log analysis engine wired up to
+it. Currently understands Linux `auth.log` (SSH/sudo); more formats are
+meant to be added one at a time (see `parser.py` architecture note below).
 
 ## Commands
 
@@ -21,9 +21,10 @@ uvicorn main:app --reload  # http://localhost:8000
 
 There is no test suite, linter, or CI config in this repo yet. There is no
 CLI entrypoint for the analyzer — it's only reachable via `POST /analyze`
-(multipart file upload, `.log` files only) or by importing
-`parser.analyze_log_content` directly (e.g. in a `python -c` one-liner) when
-iterating on it standalone.
+(multipart upload, `.log`/`.txt`, requires an active subscription) or by
+importing `parser.analyze_log_content` directly (e.g. in a `python -c`
+one-liner) when iterating on detection logic standalone, which is much
+faster than round-tripping through the dashboard upload form.
 
 Docker: `docker build -t sentinel . && docker run -p 8000:8000 --env-file .env sentinel`.
 
@@ -66,14 +67,30 @@ no JS framework.
   leaves `status` as `"active"` until the period actually ends — so
   `Subscription.cancel_at_period_end` tracks that intent locally; don't
   derive cancellation UI state from `status`.
-- **`parser.py` / `models.py`** — the actual analysis engine. Regex-based,
-  intentionally generic placeholder logic (severity/suspicious-pattern
-  matching via `SUSPICIOUS_PATTERNS`, `SEVERITY_MAP`) — being rebuilt
-  separately with real brute-force/suspicious-IP/scanning/web-attack
-  detection. Not currently linked from the dashboard.
+- **`parser.py` / `models.py`** — the analysis engine. `models.py` defines
+  `Finding` (severity/category/description/evidence) and
+  `LogAnalysisResponse` — the schema is findings-shaped, not generic
+  error/warning counts, because the product is "plain-English security
+  findings," not a log grep tool. `parser.py`'s `analyze_log_content` is a
+  dispatcher: `detect_log_type` sniffs the format from a signature regex,
+  then hands off to a per-format `_analyze_<format>(lines)` function
+  (currently only `_analyze_linux_auth`); an unrecognized format returns an
+  empty findings list with an explanatory `summary.note` rather than an
+  error. Add a new log format by writing another `_analyze_<format>`
+  function and a signature check in `detect_log_type` — don't try to
+  generalize the regexes across formats prematurely, each format's log
+  lines are structurally different enough that a shared parser adds
+  complexity without reuse. Detection thresholds (`BRUTE_FORCE_THRESHOLD`,
+  etc.) are module-level constants at the top of the file, deliberately not
+  configurable per-user yet.
 - **`templates/`** — `base.html` layout plus one template per page
   (landing/signup/login/pricing/dashboard/checkout). `checkout.html` embeds
   Razorpay Checkout.js and posts the payment result to `/billing/verify`.
+  `dashboard.html` has an upload form that POSTs to `/analyze` via `fetch`
+  and renders the JSON response client-side with vanilla JS (no build step,
+  consistent with the rest of the app) — the severity-to-color mapping and
+  finding-card layout live in `static/style.css` under `.severity-*` /
+  `.finding-card`.
 
 ## Working in this repo
 

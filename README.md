@@ -8,11 +8,8 @@ indicators, anomalies.
 
 ## What's in this repo right now
 
-This is the **shell**: landing page, signup/login, Razorpay billing, and a
-gated dashboard. The actual analysis engine (`parser.py` / `models.py` / the
-`/analyze` endpoint) is an early, generic version and is being rebuilt
-separately — the dashboard currently shows a "coming soon" placeholder
-instead of wiring up to it.
+Landing page, signup/login, Razorpay billing, a gated dashboard, and a real
+log analysis engine wired up to it — upload a file, get findings.
 
 | Piece | Status |
 | --- | --- |
@@ -20,8 +17,32 @@ instead of wiring up to it.
 | Signup / login (email + password, session cookie) | ✅ |
 | Pricing page + Razorpay Checkout (recurring subscription) | ✅ |
 | Razorpay webhook (reconciles renewals/cancellations) | ✅ |
-| Gated dashboard | ✅ (placeholder content) |
-| Log analysis engine wired into the dashboard | ⏳ later |
+| Gated dashboard with log upload + findings UI | ✅ |
+| Log analysis engine | ✅ Linux `auth.log` (SSH/sudo); more formats ⏳ |
+
+## Log analysis engine
+
+`parser.py` currently understands **Linux `auth.log`** (sshd + sudo/su
+lines in classic syslog format) and turns it into a list of findings, not
+just error/warning counts:
+
+- **Brute-force SSH attempts** — 5+ failed passwords from one source IP
+- **Username enumeration** — 5+ distinct nonexistent usernames from one IP
+- **Possible compromise** — a successful login from an IP that was just
+  brute-forcing
+- **Direct root logins**, **off-hours logins**, **sensitive sudo commands**
+  (`passwd`, `useradd`, shells, network tools, encoded payloads), and
+  **`su` to root**
+
+Detection is threshold-based (tunable constants at the top of `parser.py`);
+an unrecognized log format returns an empty finding list with a note rather
+than an error, so the UI degrades gracefully as more formats are added.
+`main.py`'s `/analyze` endpoint requires an active subscription — it's the
+paid feature, not a public utility.
+
+Adding a new format: write a `_analyze_<format>(lines)` function that
+returns a `LogAnalysisResponse`, add a signature check to `detect_log_type`,
+and dispatch to it from `analyze_log_content`.
 
 ## Local setup
 
@@ -112,6 +133,6 @@ billing.py    Razorpay subscription checkout, cancellation, webhook handler
 db.py         SQLAlchemy models (User, Subscription) + SQLite setup
 templates/    Jinja2 pages (landing, signup, login, pricing, dashboard)
 static/       stylesheet
-models.py     Pydantic response schema for /analyze (existing tool code)
-parser.py     log-parsing/analysis logic (existing tool code, to be rebuilt)
+models.py     Pydantic response schema for /analyze (Finding, LogAnalysisResponse)
+parser.py     log parsing/detection logic — see "Log analysis engine" above
 ```

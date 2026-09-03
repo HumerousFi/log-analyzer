@@ -1,18 +1,33 @@
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+Severity = Literal["critical", "high", "medium", "low", "info"]
 
 
-class GroupedIssue(BaseModel):
-    issue_type: str
+class Finding(BaseModel):
+    id: str
+    title: str
+    severity: Severity
+    category: str
+    description: str
     count: int
+    source_ips: list[str] = Field(default_factory=list)
+    users: list[str] = Field(default_factory=list)
+    first_seen: str | None = None
+    last_seen: str | None = None
+    sample_lines: list[str] = Field(default_factory=list)
+
+
+class TimeRange(BaseModel):
+    start: str | None = None
+    end: str | None = None
 
 
 class LogAnalysisResponse(BaseModel):
-    total_errors: int
-    total_warnings: int
-    timestamps: list[str]
-    grouped_issues: list[GroupedIssue]
-    most_frequent_issues: list[GroupedIssue]
-    severity_breakdown: list[GroupedIssue]
-    suspicious_activity: list[GroupedIssue]
-    top_problem_lines: list[dict]
+    log_type: str
+    total_lines: int
+    parsed_lines: int
+    time_range: TimeRange
+    findings: list[Finding]
     summary: dict

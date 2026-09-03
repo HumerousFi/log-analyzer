@@ -58,14 +58,12 @@ def dashboard(request: Request, user: User = Depends(require_active_subscription
     return templates.TemplateResponse(request, "dashboard.html", {"user": user})
 
 
-# --- Analysis API (existing tool, unchanged for now; the dashboard above will
-#     be wired up to this once the analyzer itself is ready to ship) ---
-
-
 @app.post("/analyze", response_model=LogAnalysisResponse)
-async def analyze_log(file: UploadFile = File(...)):
-    if not file.filename.endswith(".log"):
-        raise HTTPException(status_code=400, detail="Only .log files supported")
+async def analyze_log(
+    file: UploadFile = File(...), user: User = Depends(require_active_subscription)
+):
+    if not (file.filename.endswith(".log") or file.filename.endswith(".txt")):
+        raise HTTPException(status_code=400, detail="Only .log or .txt files supported")
 
     content = await file.read()
     text = content.decode("utf-8", errors="ignore")

@@ -13,15 +13,127 @@
     </p>
   {% endif %}
 
-  <div class="placeholder-card">
-    <h2>📊 Log analyzer</h2>
-    <p>
-      The upload &amp; analysis interface is coming soon. Your access is
-      already active, so you'll get in the moment it ships — no action
-      needed.
+  <div class="upload-card">
+    <h2>Analyze a log file</h2>
+    <p class="muted">
+      Currently supports Linux <code>auth.log</code> (SSH/sudo). More formats
+      are being added.
     </p>
+    <form id="analyze-form">
+      <input type="file" id="log-file" name="file" accept=".log,.txt" required>
+      <button class="btn btn-primary" type="submit">Analyze</button>
+    </form>
+    <p id="analyze-status" class="muted" hidden></p>
   </div>
+
+  <div id="results"></div>
 
   <p class="muted"><a href="/pricing">Manage subscription</a></p>
 </section>
+
+<script>
+(function () {
+  var form = document.getElementById("analyze-form");
+  var status = document.getElementById("analyze-status");
+  var results = document.getElementById("results");
+
+  var SEVERITY_LABEL = {
+    critical: "Critical", high: "High", medium: "Medium", low: "Low", info: "Info"
+  };
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var fileInput = document.getElementById("log-file");
+    if (!fileInput.files.length) return;
+
+    status.hidden = false;
+    status.textContent = "Analyzing…";
+    results.innerHTML = "";
+
+    var formData = new FormData();
+    formData.append("file", fileInput.files[0]);
+
+    fetch("/analyze", { method: "POST", body: formData })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().catch(function () { return {}; }).then(function (err) {
+            throw new Error(err.detail || "Analysis failed.");
+          });
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        status.hidden = true;
+        renderResults(data);
+      })
+      .catch(function (err) {
+        status.hidden = false;
+        status.textContent = err.message;
+      });
+  });
+
+  function renderResults(data) {
+    if (data.log_type === "unknown") {
+      var note = (data.summary && data.summary.note) || "Unrecognized log format.";
+      results.innerHTML = '<div class="placeholder-card"><p>' + escapeHtml(note) + "</p></div>";
+      return;
+    }
+
+    var summary = data.summary || {};
+    var summaryHtml = '<div class="summary-grid">' + Object.keys(summary).map(function (key) {
+      return (
+        '<div class="summary-stat"><span class="summary-value">' +
+        escapeHtml(String(summary[key])) +
+        '</span><span class="summary-label">' +
+        escapeHtml(key.replace(/_/g, " ")) +
+        "</span></div>"
+      );
+    }).join("") + "</div>";
+
+    var findingsHtml;
+    if (!data.findings.length) {
+      findingsHtml = '<p class="muted">No security findings — log looks clean.</p>';
+    } else {
+      findingsHtml = data.findings.map(renderFinding).join("");
+    }
+
+    results.innerHTML =
+      "<h2>Results</h2>" +
+      '<p class="muted">' + data.parsed_lines + " of " + data.total_lines + " lines matched known patterns.</p>" +
+      summaryHtml +
+      "<h3>Findings</h3>" +
+      findingsHtml;
+  }
+
+  function renderFinding(finding) {
+    var badge = '<span class="severity severity-' + finding.severity + '">' +
+      (SEVERITY_LABEL[finding.severity] || finding.severity) + "</span>";
+
+    var meta = [];
+    if (finding.source_ips && finding.source_ips.length) meta.push("IPs: " + finding.source_ips.join(", "));
+    if (finding.users && finding.users.length) meta.push("Users: " + finding.users.join(", "));
+    if (finding.first_seen) meta.push("First: " + finding.first_seen);
+    if (finding.last_seen) meta.push("Last: " + finding.last_seen);
+
+    var samples = (finding.sample_lines || []).map(function (l) {
+      return '<pre class="sample-line">' + escapeHtml(l) + "</pre>";
+    }).join("");
+
+    return (
+      '<div class="finding-card">' +
+      '<div class="finding-header">' + badge + "<h4>" + escapeHtml(finding.title) + "</h4></div>" +
+      "<p>" + escapeHtml(finding.description) + "</p>" +
+      (meta.length ? '<p class="muted finding-meta">' + escapeHtml(meta.join(" · ")) + "</p>" : "") +
+      samples +
+      "</div>"
+    );
+  }
+
+  function escapeHtml(str) {
+    var div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+})();
+</script>
 {% endblock %}
