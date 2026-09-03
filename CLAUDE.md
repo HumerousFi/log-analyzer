@@ -41,6 +41,14 @@ no JS framework.
   mechanism `auth.require_user` / `require_active_subscription` use to bounce
   unauthenticated or unpaid users to `/login` or `/pricing`, so raise that
   pattern rather than `RedirectResponse` inside a dependency.
+  `/analyze` reads the upload in bounded chunks up to `MAX_UPLOAD_BYTES`
+  (20 MB, raising 413 past it) and runs `analyze_log_content` via
+  `run_in_threadpool` rather than calling it directly - it's CPU-bound and
+  took ~2s on a 300k-line file in testing; calling it inline on this
+  single-process server measurably stalled every other concurrent request
+  (confirmed: a 1.75s landing-page delay during one large upload) for the
+  duration. Don't call `analyze_log_content` (or any future
+  `_analyze_<format>`) synchronously from this route again.
 - **`auth.py`** — signup/login/logout, bcrypt password hashing, and
   itsdangerous-signed session cookies (`SESSION_COOKIE`, 30-day max age, no
   server-side session store). Exposes the two auth dependencies every
@@ -90,6 +98,44 @@ no JS framework.
   complexity without reuse. Detection thresholds (`BRUTE_FORCE_THRESHOLD`,
   etc.) are module-level constants at the top of the file, deliberately not
   configurable per-user yet.
+  - **Verified against real-world logs, not just synthetic ones.** Testing
+    against loghub's real OpenSSH honeypot and RHEL/CentOS syslog datasets
+    surfaced several bugs that a hand-written test log never would have
+    (see git history around the commit that fixed them for the full
+    writeup). Three patterns worth knowing before touching this file again:
+    1. **Program-name prefixes must tolerate a PAM wrapper.** RHEL/CentOS
+       (and some Debian configs) tag the syslog facility itself with the
+       PAM module name — `sshd(pam_unix)[1234]:` instead of `sshd[1234]:`.
+       `SSHD_PREFIX`/`SUDO_PREFIX`/`SU_PREFIX` all account for this
+       already — don't hardcode a bare `sshd\[\d+\]:` again in a new
+       regex, or that entire OS family silently stops parsing.
+    2. **rsyslog collapses repeated identical lines** into
+       `message repeated N times: [ <original> ]` — and does so *more*
+       under a heavier attack, hiding scale exactly when it matters most.
+       `_unwrap_repeated` + the `weight` field on every event dict handle
+       this; any new per-line regex needs to run against the
+       normalized/unwrapped line (see the top of the loop in
+       `_analyze_linux_auth`) and multiply its count by `weight`, not just
+       `len(...)` the list.
+    3. **The "possible compromise" finding has a deliberate time window**
+       (`COMPROMISE_LOOKBACK`) and is restricted to `method == "password"`.
+       Without the window, one old brute-force burst permanently flags
+       every future login from that IP (IPs get reassigned/shared/NAT'd);
+       without the method check, a legitimate publickey login gets called
+       "possibly guessed or brute-forced," which doesn't even make sense
+       for key-based auth. Don't remove either guard to "simplify" this.
+  - **`su` detection matches the real `pam_unix` format** (`session opened
+    for user X by Y(uid=N)`, actor blank when root/system did it directly)
+    — this is what every modern distro actually logs. The two other
+    alternatives in `SU_SUCCESS_RE` are for older/rarer formats; don't
+    delete the `pam_unix` branch to "clean up," it's the one that matters.
+  - **Memory**: `failed_by_ip` only retains raw line text for the first
+    `MAX_RETAINED_LINES_PER_BUCKET` (== `MAX_SAMPLE_LINES`) attempts per IP
+    — beyond that, entries still count toward totals/severity but drop
+    their `line` text (set to `None`), since nothing beyond the sample
+    count is ever rendered. This bounds memory on a multi-million-line
+    brute-force flood. If you add a new bucket that can grow unboundedly
+    with attack volume, apply the same cap.
 - **`templates/`** — `base.html` layout plus one template per page
   (landing/signup/login/pricing/dashboard/checkout). `checkout.html` embeds
   Razorpay Checkout.js and posts the payment result to `/billing/verify`.

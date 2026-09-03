@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +19,10 @@ from models import LogAnalysisResponse
 from parser import analyze_log_content
 
 app = FastAPI(title="Security Log Analyzer")
+
+# The analyzer is CPU-bound and reads the whole upload into memory - cap it so
+# one large file can't tie up a worker thread indefinitely or exhaust memory.
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
@@ -77,7 +82,19 @@ async def analyze_log(
     if not (file.filename.endswith(".log") or file.filename.endswith(".txt")):
         raise HTTPException(status_code=400, detail="Only .log or .txt files supported")
 
-    content = await file.read()
-    text = content.decode("utf-8", errors="ignore")
+    chunks = []
+    total = 0
+    while chunk := await file.read(1024 * 1024):
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
+            )
+        chunks.append(chunk)
+    text = b"".join(chunks).decode("utf-8", errors="ignore")
 
-    return analyze_log_content(text)
+    # analyze_log_content is CPU-bound (regex over every line) and can take
+    # seconds on a large file - run it off the event loop so it doesn't stall
+    # every other concurrent request on this single-process server.
+    return await run_in_threadpool(analyze_log_content, text)

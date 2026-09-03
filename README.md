@@ -22,14 +22,16 @@ log analysis engine wired up to it — upload a file, get findings.
 
 ## Log analysis engine
 
-`parser.py` currently understands **Linux `auth.log`** (sshd + sudo/su
-lines in classic syslog format) and turns it into a list of findings, not
-just error/warning counts:
+`parser.py` currently understands **Linux `auth.log`** — both classic
+OpenSSH-style syslog (`sshd[1234]:`) and RHEL/CentOS-style PAM-wrapped
+syslog (`sshd(pam_unix)[1234]:`) — and turns it into a list of findings,
+not just error/warning counts:
 
 - **Brute-force SSH attempts** — 5+ failed passwords from one source IP
 - **Username enumeration** — 5+ distinct nonexistent usernames from one IP
-- **Possible compromise** — a successful login from an IP that was just
-  brute-forcing
+- **Possible compromise** — a *password* login succeeding within 30 minutes
+  of 5+ failed password attempts from the same IP (publickey logins and
+  older bursts are excluded — see below)
 - **Direct root logins**, **off-hours logins**, **sensitive sudo commands**
   (`passwd`, `useradd`, shells, network tools, encoded payloads), and
   **`su` to root**
@@ -38,7 +40,26 @@ Detection is threshold-based (tunable constants at the top of `parser.py`);
 an unrecognized log format returns an empty finding list with a note rather
 than an error, so the UI degrades gracefully as more formats are added.
 `main.py`'s `/analyze` endpoint requires an active subscription — it's the
-paid feature, not a public utility.
+paid feature, not a public utility — reads uploads in bounded chunks up to
+20 MB, and runs the analysis in a worker thread so a large file doesn't
+stall the app for other users.
+
+**Verified against real-world data.** This was tested against two real
+public datasets (loghub's OpenSSH honeypot log and a real RHEL/CentOS
+`/var/log/messages` capture), not just hand-written samples, which
+surfaced and led to fixing several real gaps:
+- `su`-to-root detection now matches the actual `pam_unix` message format
+  every modern distro logs (it previously matched formats that don't
+  really occur in practice).
+- RHEL/CentOS-style PAM-wrapped logs (`sshd(pam_unix)[...]`) are now
+  understood at all — this previously reported "unsupported format" with
+  zero findings despite real attack traffic being present.
+- rsyslog's `message repeated N times: [...]` line-collapsing is now
+  unwrapped and weighted correctly, instead of silently undercounting
+  attack volume (which it does more of the busier an attack gets).
+- "Possible compromise" no longer flags a legitimate login forever just
+  because that IP brute-forced once at some point in the file's history,
+  and no longer flags publickey logins (which can't be "guessed").
 
 Adding a new format: write a `_analyze_<format>(lines)` function that
 returns a `LogAnalysisResponse`, add a signature check to `detect_log_type`,
