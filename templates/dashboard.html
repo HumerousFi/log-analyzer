@@ -3,9 +3,15 @@
 {% block content %}
 <section class="dashboard">
   <h1>Welcome, {{ user.email }}</h1>
-  <p class="badge badge-active">
-    Access active until {{ user.subscription.current_period_end.strftime('%d %b %Y') }}
-  </p>
+  {% if user.subscription.cancel_at_period_end %}
+    <p class="badge badge-active">
+      Access until {{ user.subscription.current_period_end.strftime('%d %b %Y') }} (cancelled)
+    </p>
+  {% else %}
+    <p class="badge badge-active">
+      Renews on {{ user.subscription.current_period_end.strftime('%d %b %Y') }}
+    </p>
+  {% endif %}
 
   <div class="placeholder-card">
     <h2>📊 Log analyzer</h2>
@@ -16,6 +22,6 @@
     </p>
   </div>
 
-  <p class="muted"><a href="/pricing">Extend access</a></p>
+  <p class="muted"><a href="/pricing">Manage subscription</a></p>
 </section>
 {% endblock %}

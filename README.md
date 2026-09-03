@@ -18,11 +18,10 @@ instead of wiring up to it.
 | --- | --- |
 | Landing page | ✅ |
 | Signup / login (email + password, session cookie) | ✅ |
-| Pricing page + Razorpay Checkout (one-time charge) | ✅ |
-| Razorpay webhook (backup activation on payment capture) | ✅ |
+| Pricing page + Razorpay Checkout (recurring subscription) | ✅ |
+| Razorpay webhook (reconciles renewals/cancellations) | ✅ |
 | Gated dashboard | ✅ (placeholder content) |
 | Log analysis engine wired into the dashboard | ⏳ later |
-| Real recurring Razorpay Subscriptions | ⏳ blocked on KYC, see below |
 
 ## Local setup
 
@@ -45,30 +44,43 @@ Visit http://localhost:8000
 
 ## Razorpay setup (test mode)
 
-Razorpay hands out **test-mode** API keys as soon as you sign up, but the
-**Subscriptions product specifically returns 401 until it's enabled** on
-the account (in practice this seems tied to KYC/business approval, even in
-test mode — general Payments/Orders/Customers endpoints work fine before
-that). So for now, billing is a flat one-time charge via the **Orders API**
-that grants `PLAN_PERIOD_DAYS` (30) days of access, not a real recurring
-Razorpay Subscription. Swap `billing.py` back to the Subscriptions API
-(Plans + `subscription.create`) once Subscriptions is enabled on the
-account — the Checkout.js/webhook plumbing carries over, only the
-order-vs-subscription object changes.
+Billing is a real recurring Razorpay **Subscription** (₹4,900/month). The
+Plan is auto-created/discovered on first checkout (`billing.py`'s
+`_get_or_create_plan`) — no manual Plan ID to configure. Note: the
+Subscriptions product (`/v1/plans`, `/v1/subscriptions`) returns `401` on a
+brand-new Razorpay account until KYC/business approval clears, even though
+Payments/Orders/Customers work in test mode from day one.
 
 1. Dashboard → **Settings → API keys** → Regenerate Key. Put the pair in
    `.env` as `RAZORPAY_KEY_ID` (`rzp_test_...`) and `RAZORPAY_KEY_SECRET`.
 2. Dashboard → **Settings → Webhooks** → add an endpoint. In test mode you'll
    need a public URL for your local server (e.g. `ngrok http 8000`) pointed
-   at `/billing/webhook`, subscribed to the `payment.captured` event. Put the
-   secret you set there into `.env` as `RAZORPAY_WEBHOOK_SECRET`.
-3. Use a [test card](https://razorpay.com/docs/payments/payments/test-card-upi-details/)
-   like `4111 1111 1111 1111`, any future expiry, any CVC — or test UPI id
-   `success@razorpay`.
+   at `/billing/webhook`, subscribed to `subscription.activated`,
+   `subscription.charged`, `subscription.cancelled`, and `subscription.halted`.
+   Put the secret you set there into `.env` as `RAZORPAY_WEBHOOK_SECRET`.
+3. Test cards: a normal one-time test card (e.g. `4111 1111 1111 1111`) gets
+   rejected with "not eligible for recurring payments" — use the
+   [recurring-payments test card](https://razorpay.com/docs/payments/payments/test-card-details/)
+   `4718 6091 0820 4366` instead (any future expiry, any CVV). Checkout will
+   also ask for a mobile number and an OTP: sequential/repeated-digit numbers
+   (`9876543210`, `9999999999`) are rejected as fake — use a varied 10-digit
+   number instead (e.g. `9845123067`); the OTP screen has a "Skip OTP"
+   shortcut in test mode, or accepts any 6 digits on the simulated bank page.
 
-Checkout grants access immediately client-side (signature verified in
-`/billing/verify`); the webhook is a backup in case the browser closes
-before that fires. Both paths are idempotent per Razorpay order id.
+Checkout grants access immediately client-side once the payment signature is
+verified in `/billing/verify` (the signature alone is proof of a successful
+charge — a live Razorpay `subscription.fetch` call is attempted for the
+exact renewal date but is best-effort, since gating access on that live call
+means a transient network error to Razorpay could otherwise strand a
+paying user). The webhook reconciles renewals, cancellations, and any
+period-end drift from that fallback. `Subscription.credited_payment_id`
+makes both paths idempotent per Razorpay payment id.
+
+Cancelling (`/billing/cancel`) calls `subscription.cancel` with
+`cancel_at_cycle_end: 1` — Razorpay's subscription entity has no field
+marking a pending cancellation (its `status` stays `"active"` until the
+period actually ends), so `Subscription.cancel_at_period_end` tracks that
+intent locally for UI messaging.
 
 In production, generate the equivalent **live** key pair once KYC is
 approved, and add a live webhook endpoint in the Dashboard pointing at

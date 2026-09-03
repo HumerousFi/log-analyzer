@@ -3,11 +3,11 @@
 {% block content %}
 <section class="pricing">
   <h1>Simple pricing</h1>
-  <p class="lede">One plan. 30 days of access per purchase, renew anytime.</p>
+  <p class="lede">One plan. Billed monthly, cancel anytime.</p>
 
   <div class="plan-card">
     <h2>Sentinel</h2>
-    <p class="price">₹4,900<span>/30 days</span></p>
+    <p class="price">₹4,900<span>/month</span></p>
     <ul>
       <li>Unlimited log uploads</li>
       <li>Brute-force &amp; scanning detection</li>
@@ -16,14 +16,21 @@
     </ul>
 
     {% if subscribed %}
-      <p class="muted">
-        Access active until
-        {{ user.subscription.current_period_end.strftime('%d %b %Y') }}.
-      </p>
+      {% if user.subscription.cancel_at_period_end %}
+        <p class="muted">
+          Cancelled — access until
+          {{ user.subscription.current_period_end.strftime('%d %b %Y') }}.
+        </p>
+      {% else %}
+        <p class="muted">
+          Renews on
+          {{ user.subscription.current_period_end.strftime('%d %b %Y') }}.
+        </p>
+        <form method="post" action="/billing/cancel">
+          <button class="btn-link" type="submit">Cancel subscription</button>
+        </form>
+      {% endif %}
       <a class="btn btn-primary" href="/dashboard">Go to dashboard</a>
-      <form method="post" action="/billing/checkout">
-        <button class="btn btn-ghost" type="submit">Extend another 30 days</button>
-      </form>
     {% elif user %}
       <form method="post" action="/billing/checkout">
         <button class="btn btn-primary" type="submit">Subscribe</button>

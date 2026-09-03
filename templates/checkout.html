@@ -9,11 +9,9 @@
 <script>
   var options = {
     key: "{{ key_id }}",
-    order_id: "{{ order_id }}",
-    amount: "{{ amount }}",
-    currency: "INR",
+    subscription_id: "{{ subscription_id }}",
     name: "Sentinel",
-    description: "Sentinel — 30 days access",
+    description: "Sentinel — monthly access",
     prefill: { email: "{{ user_email }}" },
     theme: { color: "#4fd1c5" },
     handler: function (response) {

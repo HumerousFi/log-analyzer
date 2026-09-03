@@ -1,7 +1,7 @@
 import datetime
 import os
 
-from sqlalchemy import DateTime, ForeignKey, String, create_engine
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./app.db")
@@ -37,11 +37,14 @@ class Subscription(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True)
-    # Prepaid one-time-charge access (Razorpay Orders), not a recurring
-    # Razorpay Subscription — see billing.py for why.
-    razorpay_order_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    credited_order_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    razorpay_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    credited_payment_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="none")
+    # Razorpay's cancel_at_cycle_end leaves the subscription entity's own
+    # `status` as "active" until the period actually ends (it only flips to
+    # "cancelled" via a later webhook) and exposes no other field marking the
+    # pending cancellation, so we track intent ourselves.
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False)
     current_period_end: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow

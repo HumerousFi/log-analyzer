@@ -17,18 +17,21 @@ RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
 RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")
 
-# Stopgap billing model: Razorpay Subscriptions requires the account's
-# Subscriptions product to be enabled, which is gated behind KYC/business
-# approval. Until that clears, access is sold as a flat prepaid charge via
-# the Orders API (works in test mode today) that grants a fixed number of
-# days of access. Swap this for real Razorpay Subscriptions once KYC clears.
 PLAN_AMOUNT_PAISE = 490000  # ₹4,900
-PLAN_PERIOD_DAYS = 30
+PLAN_CURRENCY = "INR"
+PLAN_PERIOD = "monthly"
+PLAN_INTERVAL = 1
+PLAN_NAME = "Sentinel Monthly"
+# Razorpay subscriptions require a total_count of billing cycles; there's no
+# "until cancelled" option, so use a number large enough to be effectively
+# unlimited (100 years of monthly billing).
+PLAN_TOTAL_COUNT = 1200
 
 router = APIRouter(prefix="/billing")
 templates = Jinja2Templates(directory="templates")
 
 _client: razorpay.Client | None = None
+_plan_id: str | None = None
 
 
 def get_client() -> razorpay.Client:
@@ -43,6 +46,38 @@ def get_client() -> razorpay.Client:
     return _client
 
 
+def _get_or_create_plan(client: razorpay.Client) -> str:
+    global _plan_id
+    if _plan_id:
+        return _plan_id
+
+    existing = client.plan.all({"count": 100})
+    for plan in existing.get("items", []):
+        item = plan.get("item", {})
+        if (
+            plan.get("period") == PLAN_PERIOD
+            and plan.get("interval") == PLAN_INTERVAL
+            and item.get("amount") == PLAN_AMOUNT_PAISE
+            and item.get("currency") == PLAN_CURRENCY
+        ):
+            _plan_id = plan["id"]
+            return _plan_id
+
+    plan = client.plan.create(
+        {
+            "period": PLAN_PERIOD,
+            "interval": PLAN_INTERVAL,
+            "item": {
+                "name": PLAN_NAME,
+                "amount": PLAN_AMOUNT_PAISE,
+                "currency": PLAN_CURRENCY,
+            },
+        }
+    )
+    _plan_id = plan["id"]
+    return _plan_id
+
+
 def _get_or_create_subscription_row(db: Session, user: User) -> Subscription:
     if user.subscription is None:
         sub = Subscription(user_id=user.id, status="none")
@@ -52,11 +87,11 @@ def _get_or_create_subscription_row(db: Session, user: User) -> Subscription:
     return user.subscription
 
 
-def _grant_access(sub_row: Subscription) -> None:
-    now = datetime.datetime.utcnow()
-    base = sub_row.current_period_end if sub_row.current_period_end and sub_row.current_period_end > now else now
-    sub_row.current_period_end = base + datetime.timedelta(days=PLAN_PERIOD_DAYS)
-    sub_row.status = "active"
+def _apply_subscription_state(sub_row: Subscription, subscription_entity: dict) -> None:
+    sub_row.status = subscription_entity.get("status", sub_row.status)
+    current_end = subscription_entity.get("current_end")
+    if current_end:
+        sub_row.current_period_end = datetime.datetime.utcfromtimestamp(current_end)
 
 
 @router.post("/checkout")
@@ -65,17 +100,20 @@ def start_checkout(
 ):
     client = get_client()
     sub_row = _get_or_create_subscription_row(db, user)
+    plan_id = _get_or_create_plan(client)
 
-    order = client.order.create(
+    subscription = client.subscription.create(
         {
-            "amount": PLAN_AMOUNT_PAISE,
-            "currency": "INR",
-            "payment_capture": 1,
+            "plan_id": plan_id,
+            "customer_notify": 1,
+            "total_count": PLAN_TOTAL_COUNT,
             "notes": {"user_id": str(user.id)},
         }
     )
 
-    sub_row.razorpay_order_id = order["id"]
+    sub_row.razorpay_subscription_id = subscription["id"]
+    sub_row.status = subscription.get("status", "created")
+    sub_row.cancel_at_period_end = False
     db.commit()
 
     return templates.TemplateResponse(
@@ -83,8 +121,7 @@ def start_checkout(
         "checkout.html",
         {
             "key_id": RAZORPAY_KEY_ID,
-            "order_id": order["id"],
-            "amount": PLAN_AMOUNT_PAISE,
+            "subscription_id": subscription["id"],
             "user_email": user.email,
         },
     )
@@ -93,7 +130,7 @@ def start_checkout(
 @router.post("/verify")
 def verify_checkout(
     razorpay_payment_id: str = Form(...),
-    razorpay_order_id: str = Form(...),
+    razorpay_subscription_id: str = Form(...),
     razorpay_signature: str = Form(...),
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
@@ -102,10 +139,10 @@ def verify_checkout(
         raise HTTPException(status_code=500, detail="Razorpay is not configured.")
 
     sub_row = user.subscription
-    if sub_row is None or sub_row.razorpay_order_id != razorpay_order_id:
-        raise HTTPException(status_code=400, detail="Order mismatch.")
+    if sub_row is None or sub_row.razorpay_subscription_id != razorpay_subscription_id:
+        raise HTTPException(status_code=400, detail="Subscription mismatch.")
 
-    payload = f"{razorpay_order_id}|{razorpay_payment_id}"
+    payload = f"{razorpay_payment_id}|{razorpay_subscription_id}"
     expected_signature = hmac.new(
         RAZORPAY_KEY_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
     ).hexdigest()
@@ -113,12 +150,39 @@ def verify_checkout(
     if not hmac.compare_digest(expected_signature, razorpay_signature):
         raise HTTPException(status_code=400, detail="Invalid payment signature.")
 
-    if sub_row.credited_order_id != razorpay_order_id:
-        _grant_access(sub_row)
-        sub_row.credited_order_id = razorpay_order_id
+    if sub_row.credited_payment_id != razorpay_payment_id:
+        # The signature is already cryptographic proof the charge succeeded
+        # (only someone holding RAZORPAY_KEY_SECRET could produce it), so a
+        # network hiccup talking to Razorpay here shouldn't block granting
+        # access. Fetch for the exact period end on a best-effort basis; fall
+        # back to a provisional 1-month grant and let the webhook true it up.
+        try:
+            subscription = get_client().subscription.fetch(razorpay_subscription_id)
+            _apply_subscription_state(sub_row, subscription)
+        except Exception:
+            sub_row.status = "active"
+            now = datetime.datetime.utcnow()
+            base = sub_row.current_period_end if sub_row.current_period_end and sub_row.current_period_end > now else now
+            sub_row.current_period_end = base + datetime.timedelta(days=30)
+
+        sub_row.credited_payment_id = razorpay_payment_id
         db.commit()
 
     return RedirectResponse(url="/dashboard?checkout=success", status_code=303)
+
+
+@router.post("/cancel")
+def cancel_subscription(user: User = Depends(require_user), db: Session = Depends(get_db)):
+    sub_row = user.subscription
+    if sub_row is None or not sub_row.razorpay_subscription_id:
+        raise HTTPException(status_code=400, detail="No subscription to cancel.")
+
+    client = get_client()
+    client.subscription.cancel(sub_row.razorpay_subscription_id, {"cancel_at_cycle_end": 1})
+    sub_row.cancel_at_period_end = True
+    db.commit()
+
+    return RedirectResponse(url="/pricing?cancel=success", status_code=303)
 
 
 @router.post("/webhook")
@@ -140,16 +204,30 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Invalid webhook signature.")
 
     event = await request.json()
-    if event.get("event") == "payment.captured":
-        payment_entity = event.get("payload", {}).get("payment", {}).get("entity", {})
-        order_id = payment_entity.get("order_id")
+    event_name = event.get("event", "")
+
+    if event_name.startswith("subscription."):
+        sub_entity = event.get("payload", {}).get("subscription", {}).get("entity", {})
+        subscription_id = sub_entity.get("id")
 
         sub_row = (
-            db.query(Subscription).filter(Subscription.razorpay_order_id == order_id).first()
+            db.query(Subscription)
+            .filter(Subscription.razorpay_subscription_id == subscription_id)
+            .first()
+            if subscription_id
+            else None
         )
-        if sub_row is not None and sub_row.credited_order_id != order_id:
-            _grant_access(sub_row)
-            sub_row.credited_order_id = order_id
-            db.commit()
+
+        if sub_row is not None:
+            if event_name == "subscription.charged":
+                payment_entity = event.get("payload", {}).get("payment", {}).get("entity", {})
+                payment_id = payment_entity.get("id")
+                if sub_row.credited_payment_id != payment_id:
+                    _apply_subscription_state(sub_row, sub_entity)
+                    sub_row.credited_payment_id = payment_id
+                    db.commit()
+            else:
+                _apply_subscription_state(sub_row, sub_entity)
+                db.commit()
 
     return {"received": True}
