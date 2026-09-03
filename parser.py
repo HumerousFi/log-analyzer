@@ -1,6 +1,7 @@
 import datetime
 import re
 from collections import defaultdict
+from urllib.parse import unquote_plus
 
 from models import Finding, LogAnalysisResponse, TimeRange
 
@@ -85,6 +86,45 @@ LINUX_AUTH_SIGNATURE_RE = re.compile(
     SSHD_PREFIX + r"|" + SUDO_PREFIX + r"\s|" + SU_PREFIX + r"\s"
 )
 
+# --- Apache/Nginx access log (Combined/Common Log Format) ---
+EXPLOIT_PROBE_THRESHOLD = 3  # exploit-pattern-matching requests from one IP
+SCAN_404_THRESHOLD = 10  # distinct 404-returning paths from one IP
+SENSITIVE_PATH_THRESHOLD = 3  # sensitive-path hits from one IP
+WEB_BRUTE_FORCE_THRESHOLD = 8  # POSTs to an auth-looking path from one IP
+
+WEB_ACCESS_RE = re.compile(
+    r'^(?P<ip>\S+)\s+\S+\s+(?P<user>\S+)\s+\[(?P<ts>[^\]]+)\]\s+'
+    r'"(?P<request>[^"]*)"\s+(?P<status>\d{3})\s+(?P<size>\S+)'
+    r'(?:\s+"(?P<referer>[^"]*)"\s+"(?P<agent>[^"]*)")?'
+)
+REQUEST_LINE_RE = re.compile(r"^(?P<method>[A-Z]+)\s+(?P<path>\S+)\s+HTTP/[\d.]+$")
+
+# Real, well-documented payloads/signatures - not fabricated - drawn from how
+# these tools/attacks actually appear in access logs.
+EXPLOIT_PATTERN_RE = re.compile(
+    r"union\s+select|select.+from|'\s*or\s*'?1'?\s*=\s*'?1|;\s*--|sleep\(\d|"
+    r"benchmark\(|<script|onerror\s*=|javascript:|\.\./\.\./|"
+    r"/etc/passwd|/etc/shadow|cmd\.exe|powershell|\$\{jndi:|"
+    r"union.{0,20}select|eval\(|base64_decode\(|/wp-config\.php",
+    re.IGNORECASE,
+)
+SCANNER_USER_AGENT_RE = re.compile(
+    r"sqlmap|nikto|nmap|masscan|dirbuster|gobuster|wpscan|acunetix|nessus|"
+    r"w3af|havij|netsparker|nuclei|zgrab|metasploit",
+    re.IGNORECASE,
+)
+SENSITIVE_PATH_RE = re.compile(
+    r"/\.env\b|/\.git/config|/wp-login\.php|/wp-admin|/phpmyadmin|"
+    r"/\.aws/credentials|/\.ssh/|/server-status|/config\.php\.bak|"
+    r"/xmlrpc\.php|/\.htpasswd|/actuator/",
+    re.IGNORECASE,
+)
+AUTH_PATH_RE = re.compile(r"/(?:wp-)?login|/admin/login|/signin|/xmlrpc\.php", re.IGNORECASE)
+
+WEB_ACCESS_SIGNATURE_RE = re.compile(
+    r'^\S+ \S+ \S+ \[[^\]]+\] "\S+ \S+ HTTP/[\d.]+" \d{3} \S+'
+)
+
 
 def _parse_timestamp(line: str) -> datetime.datetime | None:
     match = TIMESTAMP_RE.match(line)
@@ -102,6 +142,15 @@ def _parse_timestamp(line: str) -> datetime.datetime | None:
     if parsed > now + datetime.timedelta(days=1):
         parsed = parsed.replace(year=now.year - 1)
     return parsed
+
+
+def _parse_web_timestamp(ts: str) -> datetime.datetime | None:
+    # Apache/Nginx timestamps carry their own timezone offset, unlike
+    # syslog's - e.g. "10/Oct/2023:13:55:36 -0700".
+    try:
+        return datetime.datetime.strptime(ts, "%d/%b/%Y:%H:%M:%S %z")
+    except ValueError:
+        return None
 
 
 def _fmt(ts: datetime.datetime | None) -> str | None:
@@ -132,9 +181,12 @@ def detect_log_type(lines: list[str]) -> str:
     sample = lines[:200]
     if not sample:
         return "unknown"
-    hits = sum(1 for line in sample if LINUX_AUTH_SIGNATURE_RE.search(line))
-    if hits >= 3 or hits / len(sample) > 0.1:
+    auth_hits = sum(1 for line in sample if LINUX_AUTH_SIGNATURE_RE.search(line))
+    if auth_hits >= 3 or auth_hits / len(sample) > 0.1:
         return "linux_auth"
+    web_hits = sum(1 for line in sample if WEB_ACCESS_SIGNATURE_RE.search(line))
+    if web_hits >= 3 or web_hits / len(sample) > 0.1:
+        return "web_access"
     return "unknown"
 
 
@@ -144,6 +196,8 @@ def analyze_log_content(content: str) -> LogAnalysisResponse:
 
     if log_type == "linux_auth":
         return _analyze_linux_auth(lines)
+    if log_type == "web_access":
+        return _analyze_web_access(lines)
 
     return LogAnalysisResponse(
         log_type=log_type,
@@ -154,8 +208,8 @@ def analyze_log_content(content: str) -> LogAnalysisResponse:
         summary={
             "note": (
                 "This doesn't look like a supported log format yet. Currently "
-                "supported: Linux auth.log (sshd/sudo). More formats are "
-                "being added."
+                "supported: Linux auth.log (sshd/sudo), Apache/Nginx access "
+                "logs. More formats are being added."
             )
         },
     )
@@ -471,5 +525,215 @@ def _build_findings(failed_by_ip, invalid_users_by_ip, accepted_events, sudo_eve
                 sample_lines=[e["line"] for e in su_root[:MAX_SAMPLE_LINES]],
             )
         )
+
+    return findings
+
+
+def _analyze_web_access(lines: list[str]) -> LogAnalysisResponse:
+    # Keyed by IP, holding every parsed request for that IP - unlike
+    # failed_by_ip in the auth analyzer, this isn't capped at ingestion,
+    # because each detector below filters a different heterogeneous subset
+    # of it (an exploit-pattern hit might be request #200 for an IP that's
+    # otherwise browsing normally) - truncating early could discard the
+    # exact requests a detector is looking for.
+    events_by_ip: dict[str, list[dict]] = defaultdict(list)
+
+    parsed_lines = 0
+    timestamps: list[datetime.datetime] = []
+
+    for raw_line in lines:
+        match = WEB_ACCESS_RE.search(raw_line)
+        if not match:
+            continue
+        parsed_lines += 1
+
+        ts = _parse_web_timestamp(match.group("ts"))
+        if ts:
+            timestamps.append(ts)
+
+        request = match.group("request")
+        req_match = REQUEST_LINE_RE.match(request)
+        method = req_match.group("method") if req_match else None
+        raw_path = req_match.group("path") if req_match else request
+        try:
+            decoded_path = unquote_plus(raw_path)
+        except Exception:
+            decoded_path = raw_path
+
+        events_by_ip[match.group("ip")].append(
+            {
+                "method": method,
+                "path": raw_path,
+                "decoded_path": decoded_path,
+                "status": match.group("status"),
+                "agent": match.group("agent") or "",
+                "ts": ts,
+                "line": raw_line.strip(),
+            }
+        )
+
+    findings = _build_web_findings(events_by_ip)
+    findings.sort(key=lambda f: _severity_rank(f.severity))
+
+    # Real-world testing (a genuine public web server's access log) showed
+    # sensitive-path probing is usually *distributed* - many different bot
+    # IPs each trying one path once, not one IP repeating it - which the
+    # per-IP threshold above correctly doesn't alert on individually (that
+    # would be constant noise; virtually every public server sees this).
+    # Surface it in aggregate instead so it's not simply invisible.
+    sensitive_ips = {
+        ip
+        for ip, evs in events_by_ip.items()
+        for e in evs
+        if SENSITIVE_PATH_RE.search(e["decoded_path"])
+    }
+    sensitive_requests = sum(
+        1 for evs in events_by_ip.values() for e in evs if SENSITIVE_PATH_RE.search(e["decoded_path"])
+    )
+
+    summary = {
+        "total_requests": sum(len(v) for v in events_by_ip.values()),
+        "unique_source_ips": len(events_by_ip),
+        "requests_4xx": sum(
+            1 for evs in events_by_ip.values() for e in evs if e["status"].startswith("4")
+        ),
+        "requests_5xx": sum(
+            1 for evs in events_by_ip.values() for e in evs if e["status"].startswith("5")
+        ),
+        "background_sensitive_path_probes": sensitive_requests,
+        "background_sensitive_path_probe_ips": len(sensitive_ips),
+    }
+
+    return LogAnalysisResponse(
+        log_type="web_access",
+        total_lines=len(lines),
+        parsed_lines=parsed_lines,
+        time_range=TimeRange(
+            start=_fmt(min(timestamps)) if timestamps else None,
+            end=_fmt(max(timestamps)) if timestamps else None,
+        ),
+        findings=findings,
+        summary=summary,
+    )
+
+
+def _build_web_findings(events_by_ip: dict[str, list[dict]]) -> list[Finding]:
+    findings: list[Finding] = []
+
+    for ip, events in events_by_ip.items():
+        exploit_hits = [e for e in events if EXPLOIT_PATTERN_RE.search(e["decoded_path"])]
+        if len(exploit_hits) >= EXPLOIT_PROBE_THRESHOLD:
+            times = [e["ts"] for e in exploit_hits if e["ts"]]
+            severity = "critical" if len(exploit_hits) >= 20 else "high"
+            findings.append(
+                Finding(
+                    id=f"exploit_probing_{ip}",
+                    title=f"Exploit/injection probing from {ip}",
+                    severity=severity,
+                    category="web_attack",
+                    description=(
+                        f"{len(exploit_hits)} request(s) from {ip} matched known "
+                        "SQLi/XSS/path-traversal/RCE attack patterns."
+                    ),
+                    count=len(exploit_hits),
+                    source_ips=[ip],
+                    first_seen=_fmt(min(times)) if times else None,
+                    last_seen=_fmt(max(times)) if times else None,
+                    sample_lines=[e["line"] for e in exploit_hits[:MAX_SAMPLE_LINES]],
+                )
+            )
+
+        scanner_hits = [e for e in events if SCANNER_USER_AGENT_RE.search(e["agent"])]
+        if scanner_hits:
+            times = [e["ts"] for e in scanner_hits if e["ts"]]
+            agents = sorted({e["agent"] for e in scanner_hits})
+            findings.append(
+                Finding(
+                    id=f"scanner_user_agent_{ip}",
+                    title=f"Known scanning tool detected from {ip}",
+                    severity="high",
+                    category="reconnaissance",
+                    description=(
+                        f"{len(scanner_hits)} request(s) from {ip} used a known "
+                        f"scanner/exploit-tool user-agent: "
+                        f"{', '.join(agents[:MAX_LISTED_ITEMS])}."
+                    ),
+                    count=len(scanner_hits),
+                    source_ips=[ip],
+                    first_seen=_fmt(min(times)) if times else None,
+                    last_seen=_fmt(max(times)) if times else None,
+                    sample_lines=[e["line"] for e in scanner_hits[:MAX_SAMPLE_LINES]],
+                )
+            )
+
+        sensitive_hits = [e for e in events if SENSITIVE_PATH_RE.search(e["decoded_path"])]
+        if len(sensitive_hits) >= SENSITIVE_PATH_THRESHOLD:
+            times = [e["ts"] for e in sensitive_hits if e["ts"]]
+            paths = sorted({e["path"] for e in sensitive_hits})
+            findings.append(
+                Finding(
+                    id=f"sensitive_path_probing_{ip}",
+                    title=f"Sensitive path probing from {ip}",
+                    severity="medium",
+                    category="reconnaissance",
+                    description=(
+                        f"{len(sensitive_hits)} request(s) from {ip} targeted "
+                        f"sensitive paths: {', '.join(paths[:MAX_LISTED_ITEMS])}"
+                        f"{'…' if len(paths) > MAX_LISTED_ITEMS else ''}."
+                    ),
+                    count=len(sensitive_hits),
+                    source_ips=[ip],
+                    first_seen=_fmt(min(times)) if times else None,
+                    last_seen=_fmt(max(times)) if times else None,
+                    sample_lines=[e["line"] for e in sensitive_hits[:MAX_SAMPLE_LINES]],
+                )
+            )
+
+        not_found = [e for e in events if e["status"] == "404"]
+        distinct_404_paths = {e["path"] for e in not_found}
+        if len(distinct_404_paths) >= SCAN_404_THRESHOLD:
+            times = [e["ts"] for e in not_found if e["ts"]]
+            findings.append(
+                Finding(
+                    id=f"scan_404_{ip}",
+                    title=f"Directory/endpoint scanning from {ip}",
+                    severity="medium",
+                    category="reconnaissance",
+                    description=(
+                        f"{ip} requested {len(distinct_404_paths)} distinct "
+                        "nonexistent paths, consistent with automated content "
+                        "discovery (dirb/gobuster-style scanning)."
+                    ),
+                    count=len(distinct_404_paths),
+                    source_ips=[ip],
+                    first_seen=_fmt(min(times)) if times else None,
+                    last_seen=_fmt(max(times)) if times else None,
+                    sample_lines=[e["line"] for e in not_found[:MAX_SAMPLE_LINES]],
+                )
+            )
+
+        auth_posts = [
+            e for e in events if e["method"] == "POST" and AUTH_PATH_RE.search(e["decoded_path"])
+        ]
+        if len(auth_posts) >= WEB_BRUTE_FORCE_THRESHOLD:
+            times = [e["ts"] for e in auth_posts if e["ts"]]
+            paths = sorted({e["path"] for e in auth_posts})
+            findings.append(
+                Finding(
+                    id=f"web_brute_force_{ip}",
+                    title=f"Brute-force attempts on login endpoint from {ip}",
+                    severity="high",
+                    category="brute_force",
+                    description=(
+                        f"{len(auth_posts)} POST request(s) from {ip} to "
+                        f"login-like endpoint(s): {', '.join(paths[:MAX_LISTED_ITEMS])}."
+                    ),
+                    count=len(auth_posts),
+                    source_ips=[ip],
+                    first_seen=_fmt(min(times)) if times else None,
+                    last_seen=_fmt(max(times)) if times else None,
+                    sample_lines=[e["line"] for e in auth_posts[:MAX_SAMPLE_LINES]],
+                )
+            )
 
     return findings

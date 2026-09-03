@@ -89,9 +89,9 @@ no JS framework.
   findings," not a log grep tool. `parser.py`'s `analyze_log_content` is a
   dispatcher: `detect_log_type` sniffs the format from a signature regex,
   then hands off to a per-format `_analyze_<format>(lines)` function
-  (currently only `_analyze_linux_auth`); an unrecognized format returns an
-  empty findings list with an explanatory `summary.note` rather than an
-  error. Add a new log format by writing another `_analyze_<format>`
+  (`_analyze_linux_auth`, `_analyze_web_access`); an unrecognized format
+  returns an empty findings list with an explanatory `summary.note` rather
+  than an error. Add a new log format by writing another `_analyze_<format>`
   function and a signature check in `detect_log_type` — don't try to
   generalize the regexes across formats prematurely, each format's log
   lines are structurally different enough that a shared parser adds
@@ -136,6 +136,30 @@ no JS framework.
     count is ever rendered. This bounds memory on a multi-million-line
     brute-force flood. If you add a new bucket that can grow unboundedly
     with attack volume, apply the same cap.
+  - **`_analyze_web_access`** (Apache/Nginx Combined/Common Log Format)
+    keys `events_by_ip` by source IP but deliberately does **not** apply
+    the same per-bucket line-retention cap as `failed_by_ip` — each
+    detector (exploit-pattern probing, scanner user-agents, sensitive-path
+    probing, 404-scanning, login-endpoint brute-force) filters a different
+    heterogeneous subset of that IP's full request list, so an early
+    truncation could throw away the exact requests a detector needs (e.g.
+    an exploit attempt buried in an otherwise-normal browsing session from
+    that IP). The request-size cap (`MAX_UPLOAD_BYTES`) and threadpool
+    offload in `main.py` are what bound the blast radius here instead.
+    Request paths/query strings are URL-decoded once at parse time
+    (`unquote_plus`) before matching `EXPLOIT_PATTERN_RE`/
+    `SENSITIVE_PATH_RE`, since real attack payloads are almost always
+    percent-encoded on the wire.
+  - **Sensitive-path probing is usually distributed, not repeated** — real
+    testing against an actual public web server's access log showed
+    opportunistic bots each hit a sensitive path once from a different IP,
+    not one IP repeating it. The per-IP `SENSITIVE_PATH_THRESHOLD` finding
+    intentionally doesn't fire on this (alerting on every single-shot bot
+    probe would be pure noise — virtually every public server gets this
+    constantly), but `summary.background_sensitive_path_probes` /
+    `background_sensitive_path_probe_ips` surface it in aggregate so it
+    isn't simply invisible. Don't lower the per-IP threshold to "catch"
+    this pattern - it'll just create alert fatigue instead.
 - **`templates/`** — `base.html` layout plus one template per page
   (landing/signup/login/pricing/dashboard/checkout). `checkout.html` embeds
   Razorpay Checkout.js and posts the payment result to `/billing/verify`.

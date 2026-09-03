@@ -18,7 +18,7 @@ log analysis engine wired up to it — upload a file, get findings.
 | Pricing page + Razorpay Checkout (recurring subscription) | ✅ |
 | Razorpay webhook (reconciles renewals/cancellations) | ✅ |
 | Gated dashboard with log upload + findings UI | ✅ |
-| Log analysis engine | ✅ Linux `auth.log` (SSH/sudo); more formats ⏳ |
+| Log analysis engine | ✅ Linux `auth.log` (SSH/sudo), Apache/Nginx access logs; more formats ⏳ |
 
 ## Log analysis engine
 
@@ -60,6 +60,34 @@ surfaced and led to fixing several real gaps:
 - "Possible compromise" no longer flags a legitimate login forever just
   because that IP brute-forced once at some point in the file's history,
   and no longer flags publickey logins (which can't be "guessed").
+
+`parser.py` also understands **Apache/Nginx access logs** (Combined and
+Common Log Format), covering both classic web-attack reconnaissance and
+exploitation attempts:
+
+- **Exploit/injection probing** — 3+ requests from one IP matching known
+  SQLi, XSS, path-traversal, or RCE/LFI patterns (URL-decoded before
+  matching, since real payloads are almost always percent-encoded)
+- **Known scanning tools** — any request whose user-agent identifies a
+  tool like sqlmap, nikto, nmap, gobuster, wpscan, acunetix (single hit is
+  enough - no legitimate browser sends these)
+- **Sensitive path probing** — 3+ requests from one IP to paths like
+  `/.env`, `/.git/config`, `/wp-login.php`, `/phpmyadmin`, `/.aws/credentials`
+- **Directory/endpoint scanning** — 10+ distinct 404-returning paths from
+  one IP (dirb/gobuster-style content discovery)
+- **Login-endpoint brute-force** — 8+ POSTs from one IP to a login-like path
+
+Verified against a real 10,000-line production access log (a real public
+site's traffic, via Elastic's published example dataset): 100% of lines
+parsed correctly, and a real, distributed sensitive-path-probing pattern
+(different bot IPs each trying `/wp-login.php` once — ambient internet
+background noise, not something worth alerting on individually) is now
+surfaced in aggregate via `summary.background_sensitive_path_probes`
+rather than being silently invisible. The other four detectors were
+verified against a constructed test log built from genuine, publicly
+documented attack signatures (real sqlmap UA string, real SQLi/XSS/path-
+traversal payloads) since that real dataset didn't happen to contain
+active exploitation traffic.
 
 Adding a new format: write a `_analyze_<format>(lines)` function that
 returns a `LogAnalysisResponse`, add a signature check to `detect_log_type`,
