@@ -160,6 +160,41 @@ SENSITIVE_PORTS = {
 
 FIREWALL_SIGNATURE_RE = re.compile(r"\bSRC=[0-9a-fA-F:.]+\b.*\bDST=[0-9a-fA-F:.]+\b.*\bPROTO=\S+\b")
 
+# --- Windows Event Log exports (wevtutil "/f:text" output) ---
+# `wevtutil qe Security /f:text > security.txt` is the standard way to get a
+# Windows security event log into a plaintext file - this is the format we
+# target, not raw .evtx (binary) or the XML export.
+WINDOWS_BRUTE_FORCE_THRESHOLD = 5  # failed logons from one source
+WINDOWS_EVENT_HEADER_RE = re.compile(r"^Event\[\d+\]:\s*$")
+
+WINDOWS_EVENT_ID_RE = re.compile(r"^\s*Event ID:\s*(?P<id>\d+)\s*$", re.MULTILINE)
+WINDOWS_DATE_RE = re.compile(r"^\s*Date:\s*(?P<date>\S+)\s*$", re.MULTILINE)
+WINDOWS_COMPUTER_RE = re.compile(r"^\s*Computer:\s*(?P<computer>\S+)\s*$", re.MULTILINE)
+WINDOWS_LOGON_TYPE_RE = re.compile(r"^\s*Logon Type:\s*(?P<logon_type>\d+)\s*$", re.MULTILINE)
+WINDOWS_SOURCE_IP_RE = re.compile(r"^\s*Source Network Address:\s*(?P<ip>\S+)\s*$", re.MULTILINE)
+# Most of these event templates list the acting Subject's account first and
+# the actual target account later (e.g. 4625's "Account For Which Logon
+# Failed", 4732's "Member") - taking the *last* match consistently lands on
+# the one that matters, since "-"/blank Subject fields are common and appear
+# earlier in the block.
+WINDOWS_ACCOUNT_NAME_RE = re.compile(r"^\s*Account Name:\s*(?P<name>\S+)\s*$", re.MULTILINE)
+WINDOWS_GROUP_NAME_RE = re.compile(r"^\s*Group Name:\s*(?P<name>\S+)\s*$", re.MULTILINE)
+WINDOWS_SERVICE_NAME_RE = re.compile(r"^\s*Service Name:\s*(?P<name>.+?)\s*$", re.MULTILINE)
+
+WINDOWS_LOGON_TYPE_LABELS = {
+    "2": "Interactive", "3": "Network", "4": "Batch", "5": "Service",
+    "7": "Unlock", "8": "NetworkCleartext", "9": "NewCredentials",
+    "10": "RemoteInteractive (RDP)", "11": "CachedInteractive",
+}
+
+WINDOWS_EVENT_FAILED_LOGON = "4625"
+WINDOWS_EVENT_SUCCESSFUL_LOGON = "4624"
+WINDOWS_EVENT_ACCOUNT_LOCKOUT = "4740"
+WINDOWS_EVENT_ACCOUNT_CREATED = "4720"
+WINDOWS_EVENT_PRIV_GROUP_CHANGE = {"4728", "4732", "4756"}  # global/local/universal group member added
+WINDOWS_EVENT_AUDIT_LOG_CLEARED = "1102"
+WINDOWS_EVENT_SERVICE_INSTALLED = {"7045", "4697"}
+
 
 def _parse_timestamp(line: str) -> datetime.datetime | None:
     match = TIMESTAMP_RE.match(line)
@@ -184,6 +219,20 @@ def _parse_web_timestamp(ts: str) -> datetime.datetime | None:
     # syslog's - e.g. "10/Oct/2023:13:55:36 -0700".
     try:
         return datetime.datetime.strptime(ts, "%d/%b/%Y:%H:%M:%S %z")
+    except ValueError:
+        return None
+
+
+def _parse_windows_timestamp(ts: str) -> datetime.datetime | None:
+    # wevtutil emits ISO-8601 UTC with a trailing "Z" and up to 7 fractional
+    # digits (100ns ticks) - fromisoformat only accepts up to 6, so trim.
+    ts = ts.strip().replace("Z", "+00:00")
+    if "." in ts:
+        head, _, tail = ts.partition(".")
+        frac, _, tz = tail.partition("+")
+        ts = f"{head}.{frac[:6]}+{tz}" if tz else f"{head}.{frac[:6]}"
+    try:
+        return datetime.datetime.fromisoformat(ts)
     except ValueError:
         return None
 
@@ -225,6 +274,9 @@ def detect_log_type(lines: list[str]) -> str:
     firewall_hits = sum(1 for line in sample if FIREWALL_SIGNATURE_RE.search(line))
     if firewall_hits >= 3 or firewall_hits / len(sample) > 0.1:
         return "firewall"
+    windows_hits = sum(1 for line in sample if WINDOWS_EVENT_HEADER_RE.match(line))
+    if windows_hits >= 3 or windows_hits / len(sample) > 0.1:
+        return "windows_event"
     return "unknown"
 
 
@@ -238,6 +290,8 @@ def analyze_log_content(content: str) -> LogAnalysisResponse:
         return _analyze_web_access(lines)
     if log_type == "firewall":
         return _analyze_firewall(lines)
+    if log_type == "windows_event":
+        return _analyze_windows_events(lines)
 
     return LogAnalysisResponse(
         log_type=log_type,
@@ -249,8 +303,8 @@ def analyze_log_content(content: str) -> LogAnalysisResponse:
             "note": (
                 "This doesn't look like a supported log format yet. Currently "
                 "supported: Linux auth.log (sshd/sudo), Apache/Nginx access "
-                "logs, firewall logs (iptables/ufw). More formats are being "
-                "added."
+                "logs, firewall logs (iptables/ufw), Windows Event Log exports "
+                "(wevtutil text format). More formats are being added."
             )
         },
     )
@@ -926,5 +980,307 @@ def _build_firewall_findings(events_by_src: dict[str, list[dict]]) -> list[Findi
                     sample_lines=[e["line"] for e in sensitive_hits[:MAX_SAMPLE_LINES]],
                 )
             )
+
+    return findings
+
+
+def _analyze_windows_events(lines: list[str]) -> LogAnalysisResponse:
+    # Each event is a multi-line block starting at an "Event[N]:" header -
+    # unlike every other format here, a single "line" of evidence isn't one
+    # source line, so blocks are re-joined for multi-line field extraction.
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if WINDOWS_EVENT_HEADER_RE.match(line):
+            if current:
+                blocks.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        blocks.append(current)
+
+    failed_logons_by_source: dict[str, list[dict]] = defaultdict(list)
+    successful_logons: list[dict] = []
+    lockouts: list[dict] = []
+    accounts_created: list[dict] = []
+    priv_group_changes: list[dict] = []
+    audit_clears: list[dict] = []
+    services_installed: list[dict] = []
+
+    parsed_lines = 0
+    timestamps: list[datetime.datetime] = []
+
+    for block_lines in blocks:
+        block_text = "\n".join(block_lines)
+        id_match = WINDOWS_EVENT_ID_RE.search(block_text)
+        if not id_match:
+            continue
+        event_id = id_match.group("id")
+        parsed_lines += len(block_lines)
+
+        date_match = WINDOWS_DATE_RE.search(block_text)
+        ts = _parse_windows_timestamp(date_match.group("date")) if date_match else None
+        if ts:
+            timestamps.append(ts)
+
+        computer_match = WINDOWS_COMPUTER_RE.search(block_text)
+        computer = computer_match.group("computer") if computer_match else None
+
+        # The Subject's account (often "-" for anonymous/failed attempts)
+        # appears first in these templates, the target account later -
+        # taking the last non-placeholder match lands on the one that
+        # matters (e.g. the actual username a failed logon attempted).
+        account_matches = WINDOWS_ACCOUNT_NAME_RE.findall(block_text)
+        account = next((a for a in reversed(account_matches) if a and a != "-"), None) or "(unknown)"
+
+        source_ip_match = WINDOWS_SOURCE_IP_RE.search(block_text)
+        source_ip = source_ip_match.group("ip") if source_ip_match else None
+        if source_ip in ("-", "127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            source_ip = None
+
+        logon_type_match = WINDOWS_LOGON_TYPE_RE.search(block_text)
+        logon_type = logon_type_match.group("logon_type") if logon_type_match else None
+
+        entry = {
+            "event_id": event_id,
+            "ts": ts,
+            "computer": computer,
+            "account": account,
+            "source_ip": source_ip,
+            "logon_type": logon_type,
+            "line": (
+                f"Event ID {event_id} | {date_match.group('date') if date_match else '?'} | "
+                f"Computer={computer or '?'} | Account={account} | "
+                f"LogonType={WINDOWS_LOGON_TYPE_LABELS.get(logon_type, logon_type or '-')} | "
+                f"SourceIP={source_ip or '-'}"
+            ),
+        }
+
+        if event_id == WINDOWS_EVENT_FAILED_LOGON:
+            source_key = source_ip or f"{account}@{computer or 'local'}"
+            failed_logons_by_source[source_key].append(entry)
+        elif event_id == WINDOWS_EVENT_SUCCESSFUL_LOGON:
+            successful_logons.append(entry)
+        elif event_id == WINDOWS_EVENT_ACCOUNT_LOCKOUT:
+            lockouts.append(entry)
+        elif event_id == WINDOWS_EVENT_ACCOUNT_CREATED:
+            accounts_created.append(entry)
+        elif event_id in WINDOWS_EVENT_PRIV_GROUP_CHANGE:
+            group_match = WINDOWS_GROUP_NAME_RE.search(block_text)
+            entry["group"] = group_match.group("name") if group_match else "(unknown)"
+            priv_group_changes.append(entry)
+        elif event_id == WINDOWS_EVENT_AUDIT_LOG_CLEARED:
+            audit_clears.append(entry)
+        elif event_id in WINDOWS_EVENT_SERVICE_INSTALLED:
+            service_match = WINDOWS_SERVICE_NAME_RE.search(block_text)
+            entry["service"] = service_match.group("name") if service_match else "(unknown)"
+            services_installed.append(entry)
+
+    findings = _build_windows_findings(
+        failed_logons_by_source,
+        successful_logons,
+        lockouts,
+        accounts_created,
+        priv_group_changes,
+        audit_clears,
+        services_installed,
+    )
+    findings.sort(key=lambda f: _severity_rank(f.severity))
+
+    summary = {
+        "failed_logons": sum(len(v) for v in failed_logons_by_source.values()),
+        "successful_logons": len(successful_logons),
+        "account_lockouts": len(lockouts),
+        "accounts_created": len(accounts_created),
+        "privileged_group_changes": len(priv_group_changes),
+    }
+
+    return LogAnalysisResponse(
+        log_type="windows_event",
+        total_lines=len(lines),
+        parsed_lines=parsed_lines,
+        time_range=TimeRange(
+            start=_fmt(min(timestamps)) if timestamps else None,
+            end=_fmt(max(timestamps)) if timestamps else None,
+        ),
+        findings=findings,
+        summary=summary,
+    )
+
+
+def _build_windows_findings(
+    failed_logons_by_source: dict[str, list[dict]],
+    successful_logons: list[dict],
+    lockouts: list[dict],
+    accounts_created: list[dict],
+    priv_group_changes: list[dict],
+    audit_clears: list[dict],
+    services_installed: list[dict],
+) -> list[Finding]:
+    findings: list[Finding] = []
+
+    for source, attempts in failed_logons_by_source.items():
+        count = len(attempts)
+        if count < WINDOWS_BRUTE_FORCE_THRESHOLD:
+            continue
+        times = [a["ts"] for a in attempts if a["ts"]]
+        accounts = sorted({a["account"] for a in attempts})
+        is_rdp = any(a["logon_type"] == "10" for a in attempts)
+        severity = "critical" if count >= 50 else "high" if count >= 20 else "medium"
+        title = f"RDP brute-force from {source}" if is_rdp else f"Windows logon brute-force from {source}"
+        findings.append(
+            Finding(
+                id=f"windows_brute_force_{source}",
+                title=title,
+                severity=severity,
+                category="brute_force",
+                description=(
+                    f"{count} failed logon attempt(s) from {source} against "
+                    f"{len(accounts)} account(s): {', '.join(accounts[:MAX_LISTED_ITEMS])}."
+                ),
+                count=count,
+                source_ips=[source] if any(a["source_ip"] == source for a in attempts) else [],
+                users=accounts[:MAX_LISTED_ITEMS],
+                first_seen=_fmt(min(times)) if times else None,
+                last_seen=_fmt(max(times)) if times else None,
+                sample_lines=[a["line"] for a in attempts[:MAX_SAMPLE_LINES]],
+            )
+        )
+
+    for event in successful_logons:
+        source = event["source_ip"] or f"{event['account']}@{event['computer'] or 'local'}"
+        prior_failures = [
+            a
+            for a in failed_logons_by_source.get(source, [])
+            if event["ts"]
+            and a["ts"]
+            and a["ts"] <= event["ts"]
+            and event["ts"] - a["ts"] <= COMPROMISE_LOOKBACK
+        ]
+        if len(prior_failures) >= WINDOWS_BRUTE_FORCE_THRESHOLD:
+            findings.append(
+                Finding(
+                    id=f"windows_compromise_suspected_{source}_{event['account']}",
+                    title=f"Successful logon from {source} after repeated failures",
+                    severity="critical",
+                    category="possible_compromise",
+                    description=(
+                        f"{source} succeeded logging in as '{event['account']}' "
+                        f"after {len(prior_failures)} prior failed attempts within "
+                        f"{int(COMPROMISE_LOOKBACK.total_seconds() // 60)} minutes — "
+                        "the credentials may have been guessed or brute-forced."
+                    ),
+                    count=1,
+                    source_ips=[source] if event["source_ip"] else [],
+                    users=[event["account"]],
+                    first_seen=_fmt(event["ts"]),
+                    last_seen=_fmt(event["ts"]),
+                    sample_lines=[event["line"]],
+                )
+            )
+
+    if lockouts:
+        times = [e["ts"] for e in lockouts if e["ts"]]
+        accounts = sorted({e["account"] for e in lockouts})
+        findings.append(
+            Finding(
+                id="account_lockouts",
+                title="Account lockout(s) occurred",
+                severity="medium",
+                category="anomaly",
+                description=(
+                    f"{len(lockouts)} account(s) locked out after repeated failed "
+                    f"logons: {', '.join(accounts[:MAX_LISTED_ITEMS])}."
+                ),
+                count=len(lockouts),
+                users=accounts[:MAX_LISTED_ITEMS],
+                first_seen=_fmt(min(times)) if times else None,
+                last_seen=_fmt(max(times)) if times else None,
+                sample_lines=[e["line"] for e in lockouts[:MAX_SAMPLE_LINES]],
+            )
+        )
+
+    if accounts_created:
+        times = [e["ts"] for e in accounts_created if e["ts"]]
+        accounts = sorted({e["account"] for e in accounts_created})
+        findings.append(
+            Finding(
+                id="accounts_created",
+                title="New user account(s) created",
+                severity="medium",
+                category="anomaly",
+                description=(
+                    f"{len(accounts_created)} new account(s) created: "
+                    f"{', '.join(accounts[:MAX_LISTED_ITEMS])}."
+                ),
+                count=len(accounts_created),
+                users=accounts[:MAX_LISTED_ITEMS],
+                first_seen=_fmt(min(times)) if times else None,
+                last_seen=_fmt(max(times)) if times else None,
+                sample_lines=[e["line"] for e in accounts_created[:MAX_SAMPLE_LINES]],
+            )
+        )
+
+    if priv_group_changes:
+        times = [e["ts"] for e in priv_group_changes if e["ts"]]
+        accounts = sorted({e["account"] for e in priv_group_changes})
+        changes_desc = ", ".join(
+            f"{e['account']} → {e.get('group', '(unknown)')}" for e in priv_group_changes[:MAX_LISTED_ITEMS]
+        )
+        findings.append(
+            Finding(
+                id="privileged_group_changes",
+                title="Account(s) added to a privileged group",
+                severity="high",
+                category="privilege_escalation",
+                description=f"{len(priv_group_changes)} membership change(s): {changes_desc}.",
+                count=len(priv_group_changes),
+                users=accounts[:MAX_LISTED_ITEMS],
+                first_seen=_fmt(min(times)) if times else None,
+                last_seen=_fmt(max(times)) if times else None,
+                sample_lines=[e["line"] for e in priv_group_changes[:MAX_SAMPLE_LINES]],
+            )
+        )
+
+    if audit_clears:
+        times = [e["ts"] for e in audit_clears if e["ts"]]
+        findings.append(
+            Finding(
+                id="audit_log_cleared",
+                title="Security audit log was cleared",
+                severity="critical",
+                category="anti_forensics",
+                description=(
+                    f"The security event log was cleared {len(audit_clears)} "
+                    "time(s) - a common step attackers take to erase evidence. "
+                    "Legitimate causes are rare and should be verified."
+                ),
+                count=len(audit_clears),
+                first_seen=_fmt(min(times)) if times else None,
+                last_seen=_fmt(max(times)) if times else None,
+                sample_lines=[e["line"] for e in audit_clears[:MAX_SAMPLE_LINES]],
+            )
+        )
+
+    if services_installed:
+        times = [e["ts"] for e in services_installed if e["ts"]]
+        services = sorted({e.get("service", "(unknown)") for e in services_installed})
+        findings.append(
+            Finding(
+                id="services_installed",
+                title="New service(s) installed",
+                severity="medium",
+                category="persistence",
+                description=(
+                    f"{len(services_installed)} new service(s) installed: "
+                    f"{', '.join(services[:MAX_LISTED_ITEMS])}."
+                ),
+                count=len(services_installed),
+                first_seen=_fmt(min(times)) if times else None,
+                last_seen=_fmt(max(times)) if times else None,
+                sample_lines=[e["line"] for e in services_installed[:MAX_SAMPLE_LINES]],
+            )
+        )
 
     return findings

@@ -89,7 +89,8 @@ no JS framework.
   findings," not a log grep tool. `parser.py`'s `analyze_log_content` is a
   dispatcher: `detect_log_type` sniffs the format from a signature regex,
   then hands off to a per-format `_analyze_<format>(lines)` function
-  (`_analyze_linux_auth`, `_analyze_web_access`, `_analyze_firewall`); an
+  (`_analyze_linux_auth`, `_analyze_web_access`, `_analyze_firewall`,
+  `_analyze_windows_events`); an
   unrecognized format returns an empty findings list with an explanatory
   `summary.note` rather than an error. Add a new log format by writing
   another `_analyze_<format>`
@@ -175,6 +176,35 @@ no JS framework.
     that assumes `blocked` means something. Same aggregate-visibility
     pattern as web sensitive-path probing applies to `SENSITIVE_PORTS`
     (Telnet/RDP/SMB/etc.) — see `background_sensitive_port_probes`.
+  - **`_analyze_windows_events`** targets `wevtutil qe <Log> /f:text` output
+    specifically — not raw `.evtx` (binary) and not the XML export. It's
+    structurally different from every other format here: one event is a
+    multi-line block starting at an `Event[N]:` header, not one line, so
+    `_analyze_windows_events` first groups `lines` into blocks before any
+    field extraction, and every regex (`WINDOWS_EVENT_ID_RE`,
+    `WINDOWS_ACCOUNT_NAME_RE`, etc.) runs with `re.MULTILINE` against the
+    whole re-joined block text, not per-line. `parsed_lines` counts every
+    line belonging to a block that had a recognizable Event ID, not one
+    per event, so the "X of Y lines matched" ratio in the UI stays
+    meaningful for these much longer records.
+    - Most of these event templates list an acting "Subject" account
+      first and the actual target account later in the same block (e.g.
+      4625's "Account For Which Logon Failed", 4732's "Member") — both
+      show up as separate `Account Name:` matches. Taking the *last*
+      non-placeholder (`WINDOWS_ACCOUNT_NAME_RE.findall` + reversed) match
+      is what correctly extracts the target rather than the Subject
+      (frequently `-` for anonymous/failed attempts). Don't switch this to
+      the first match.
+    - Only a curated set of event IDs is handled (4624/4625 logons, 4740
+      lockout, 4720 account creation, 4728/4732/4756 privileged group
+      membership, 1102 audit-log-cleared, 7045/4697 service installed) —
+      this is deliberately not a generic "parse every event" engine, same
+      reasoning as not generalizing regexes across the other formats.
+    - Verified against Microsoft's documented Security-Auditing event
+      schema (field names/structure are stable and well-documented) plus
+      a constructed test file built from that schema — no real anonymized
+      wevtutil export was available to test against, unlike the SSH/web
+      datasets. If a real one ever surfaces, re-verify against it.
 - **`templates/`** — `base.html` layout plus one template per page
   (landing/signup/login/pricing/dashboard/checkout). `checkout.html` embeds
   Razorpay Checkout.js and posts the payment result to `/billing/verify`.

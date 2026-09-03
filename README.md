@@ -18,7 +18,7 @@ log analysis engine wired up to it — upload a file, get findings.
 | Pricing page + Razorpay Checkout (recurring subscription) | ✅ |
 | Razorpay webhook (reconciles renewals/cancellations) | ✅ |
 | Gated dashboard with log upload + findings UI | ✅ |
-| Log analysis engine | ✅ Linux `auth.log` (SSH/sudo), Apache/Nginx access logs, firewall logs (iptables/ufw); more formats ⏳ |
+| Log analysis engine | ✅ Linux `auth.log`, Apache/Nginx, firewall (iptables/ufw), Windows Event Log |
 
 ## Log analysis engine
 
@@ -107,6 +107,29 @@ readily available (unlike the SSH/web-log datasets above), so this was
 verified against a constructed log using the genuine, standard netfilter
 `LOG` output format with realistic scan/flood/probe patterns rather than
 a downloaded real capture.
+
+`parser.py` also understands **Windows Event Log exports** — specifically
+`wevtutil qe <LogName> /f:text` output (e.g. `wevtutil qe Security /f:text
+> security.txt`), not raw `.evtx` or the XML export. Unlike every other
+format here, one event is a multi-line block, not one line:
+
+- **RDP/Windows logon brute-force** — 5+ failed logons (Event ID 4625) from
+  one source, labeled specifically as RDP when the logon type is
+  RemoteInteractive
+- **Possible compromise** — a successful logon (4624) within 30 minutes of
+  5+ failed attempts from the same source
+- **Account lockouts** (4740), **new accounts created** (4720), **accounts
+  added to a privileged group** (4728/4732/4756), **new services installed**
+  (7045/4697 - a common persistence mechanism)
+- **Audit log cleared** (1102) — flagged critical; legitimate reasons are
+  rare and this is a classic anti-forensics step
+
+As with firewall logs, no real anonymized `wevtutil` export was available
+to test against, so this was verified against Microsoft's documented
+Security-Auditing event schema (field names and block structure are
+stable and well-documented) plus a constructed test file built from that
+schema, covering every event type above plus legitimate traffic that
+correctly produces no findings.
 
 Adding a new format: write a `_analyze_<format>(lines)` function that
 returns a `LogAnalysisResponse`, add a signature check to `detect_log_type`,
