@@ -12,7 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import auth
 import billing
-from auth import get_current_user, require_active_subscription
+from auth import APP_BASE_URL, SECRET_KEY, get_current_user, require_active_subscription
 from db import User, get_db, init_db
 from models import LogAnalysisResponse
 from parser import analyze_log_content
@@ -28,6 +28,18 @@ app.include_router(billing.router)
 
 @app.on_event("startup")
 def on_startup() -> None:
+    # The default SECRET_KEY is fine for local dev but signs every session
+    # cookie in the app - refuse to boot with it once APP_BASE_URL points
+    # somewhere real, rather than silently running an unauthenticated-looking
+    # session system in production.
+    if SECRET_KEY == "dev-insecure-secret-change-me" and not APP_BASE_URL.startswith(
+        "http://localhost"
+    ):
+        raise RuntimeError(
+            "SECRET_KEY is still the default dev value but APP_BASE_URL "
+            f"({APP_BASE_URL!r}) doesn't look like localhost. Set a real "
+            "SECRET_KEY before deploying."
+        )
     init_db()
 
 

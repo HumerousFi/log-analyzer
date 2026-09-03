@@ -95,7 +95,17 @@ no JS framework.
 ## Working in this repo
 
 - Never commit `.env` (real Razorpay test keys live there); `.env.example`
-  is the template to keep in sync when adding new config.
+  is the template to keep in sync when adding new config. `.dockerignore`
+  also excludes it from the build context — don't remove that entry, or a
+  local `.env` gets baked into the image.
 - When touching billing, re-read the "Razorpay setup" section of
   `README.md` first — it has the up-to-date account-gating caveat and the
   webhook/test-card setup steps.
+- `main.py`'s startup hook refuses to boot if `SECRET_KEY` is still the
+  default dev value and `APP_BASE_URL` isn't `localhost` — this is
+  intentional (a forgotten `SECRET_KEY` in production silently signs every
+  session cookie with a public string). Don't relax it; set a real
+  `SECRET_KEY` in the deploy environment instead.
+- `auth.py` only marks the session cookie `Secure` when `APP_BASE_URL`
+  starts with `https://`, so it still works over plain `http://localhost`
+  in dev but won't be sent unencrypted once deployed behind HTTPS.

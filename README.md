@@ -116,13 +116,33 @@ container host works; two straightforward options:
 **Render / Railway / Fly.io** — point them at this repo, they'll build the
 `Dockerfile` automatically. Set the env vars from `.env.example` in the
 host's dashboard (never commit `.env`). Set `APP_BASE_URL` to your public
-URL once you have one, and point the Razorpay webhook endpoint at
+`https://` URL once you have one, and point the Razorpay webhook endpoint at
 `https://<that-url>/billing/webhook`.
 
 ```bash
 docker build -t sentinel .
 docker run -p 8000:8000 --env-file .env sentinel
 ```
+
+**Deploy-readiness checklist** (the app enforces some of this itself):
+
+- Set a real, random `SECRET_KEY` in the host's env vars — the app refuses
+  to start with the default dev value once `APP_BASE_URL` isn't
+  `localhost`, so a forgotten key fails loudly at boot instead of quietly
+  signing every session cookie with a public string.
+- Set `APP_BASE_URL` to your actual `https://` URL. The session cookie is
+  only marked `Secure` when this is `https://`, so setting it correctly
+  also protects the cookie in transit.
+- SQLite lives at `./app.db` inside the container by default — mount a
+  persistent volume at that path (or switch `DATABASE_URL` to a managed
+  Postgres instance) or every redeploy wipes user accounts and
+  subscriptions.
+- `.dockerignore` keeps `.env`, `venv/`, and `.git/` out of the image —
+  don't `COPY` around it or a local `.env` (real test-mode keys) ends up
+  baked into the image layers.
+- Stay on Razorpay **test-mode** keys (`rzp_test_...`) until you're ready
+  to take real payments; switching to live keys is a separate, deliberate
+  step (new key pair + new live webhook in the Razorpay Dashboard).
 
 ## Project layout
 

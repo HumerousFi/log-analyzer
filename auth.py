@@ -11,8 +11,12 @@ from sqlalchemy.orm import Session
 from db import Subscription, User, get_db
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-insecure-secret-change-me")
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")
 SESSION_COOKIE = "session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
+# Only mark the cookie Secure when we're actually served over https - a local
+# http:// dev server would otherwise have the browser silently drop it.
+COOKIE_SECURE = APP_BASE_URL.startswith("https://")
 
 _serializer = URLSafeTimedSerializer(SECRET_KEY, salt="session")
 
@@ -53,6 +57,7 @@ def set_session_cookie(response, user_id: int) -> None:
         max_age=SESSION_MAX_AGE,
         httponly=True,
         samesite="lax",
+        secure=COOKIE_SECURE,
     )
 
 
