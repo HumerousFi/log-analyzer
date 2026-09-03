@@ -1,32 +1,100 @@
 {% extends "base.html" %}
 {% block title %}Sentinel — A security analyst in a box{% endblock %}
+{% block main_class %} class="wide"{% endblock %}
 {% block content %}
-<section class="hero">
-  <h1>A security analyst in a box for your logs.</h1>
-  <p class="lede">
-    Upload your Linux auth logs, Apache/Nginx logs, firewall logs, or Windows
-    event exports. Sentinel finds brute-force attacks, suspicious IPs,
-    unusual login times, scanning activity, web attacks, and privilege
-    escalation attempts — and explains them in plain English.
-  </p>
-  <blockquote class="example">
-    “Your server received 4,281 SSH authentication attempts. This IP
-    attempted 37 usernames.”
-  </blockquote>
-  <div class="cta-row">
-    <a class="btn btn-primary" href="/signup">Get started</a>
-    <a class="btn btn-ghost" href="/pricing">See pricing</a>
+<section class="hero-wrap">
+  <div class="hero">
+    <div class="hero-copy">
+      <span class="eyebrow">Security log analysis, plain-English</span>
+      <h1>A security analyst<br>in a box for<br><span class="accent-text">your logs.</span></h1>
+      <p class="lede">
+        Upload a Linux auth log, an Apache/Nginx access log, a firewall log, or a
+        Windows Event Log export. Sentinel finds brute-force attacks, scanning
+        activity, privilege escalation, and web attacks — and tells you what
+        happened without the SIEM jargon.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="/signup">Get started</a>
+        <a class="btn btn-ghost" href="/pricing">See pricing</a>
+      </div>
+      <p class="trust-note">No agent to install. Upload a file, get findings back in seconds.</p>
+    </div>
+
+    <div class="hero-visual">
+      <div class="mock-window">
+        <div class="mock-titlebar">
+          <span class="mock-dot"></span><span class="mock-dot"></span><span class="mock-dot"></span>
+          <span class="mock-path">auth.log — 14 lines analyzed</span>
+        </div>
+        <div class="mock-body">
+          <div class="mock-summary">
+            <div class="mock-stat"><b>7</b><span>Failed logins</span></div>
+            <div class="mock-stat"><b>1</b><span>Attacking IP</span></div>
+            <div class="mock-stat"><b>7</b><span>Findings</span></div>
+          </div>
+          <div class="finding-card" style="margin-bottom:0.7rem;">
+            <div class="finding-header">
+              <span class="severity severity-critical">Critical</span>
+              <h4>Successful login after repeated failures</h4>
+            </div>
+            <p>203.0.113.9 succeeded logging in as 'root' after 7 failed attempts within 30 minutes.</p>
+          </div>
+          <div class="finding-card">
+            <div class="finding-header">
+              <span class="severity severity-medium">Medium</span>
+              <h4>Brute-force SSH attempts</h4>
+            </div>
+            <p>7 failed password attempts from 203.0.113.9 against 7 usernames.</p>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
-<section class="features">
-  <div class="feature"><h3>Brute-force detection</h3><p>Repeated failed logins, credential stuffing, and username enumeration.</p></div>
-  <div class="feature"><h3>Suspicious IPs</h3><p>Flags IPs behaving abnormally across your logs.</p></div>
-  <div class="feature"><h3>Scanning activity</h3><p>Port and path scanning patterns from web and firewall logs.</p></div>
-  <div class="feature"><h3>Plain-English reports</h3><p>No SIEM expertise required — just answers.</p></div>
-</section>
+<hr class="divider">
 
-<section class="status-note">
-  <p>🚧 The analysis engine is actively being built out. Sign up now to lock in early pricing.</p>
+<section>
+  <div class="section-head">
+    <h2>What it catches</h2>
+    <p>Threshold-tuned detection across every log format it supports — not a keyword search.</p>
+  </div>
+  <div class="features">
+    <div class="feature">
+      <span class="icon">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+      </span>
+      <h3>Brute-force &amp; compromise</h3>
+      <p>Repeated failed logins, username enumeration, and the successful login that follows one.</p>
+    </div>
+    <div class="feature">
+      <span class="icon">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      </span>
+      <h3>Scanning &amp; recon</h3>
+      <p>Port scans, directory/endpoint enumeration, and sensitive-path probing — with noisy background scans surfaced in aggregate, not spammed as alerts.</p>
+    </div>
+    <div class="feature">
+      <span class="icon">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v5c0 5-3.4 8.7-8 10-4.6-1.3-8-5-8-10V7l8-4z"/></svg>
+      </span>
+      <h3>Privilege escalation</h3>
+      <p>Direct root logins, su/sudo misuse, and accounts added to privileged groups.</p>
+    </div>
+    <div class="feature">
+      <span class="icon">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h11l5 5v11H4z"/><path d="M9 12h6M9 16h6M9 8h3"/></svg>
+      </span>
+      <h3>Plain-English reports</h3>
+      <p>Every finding names the who, what, and how many — no SIEM query language required.</p>
+    </div>
+  </div>
+
+  <div class="format-strip">
+    <span class="format-chip">Linux auth.log</span>
+    <span class="format-chip">Apache / Nginx</span>
+    <span class="format-chip">Firewall (iptables/ufw)</span>
+    <span class="format-chip">Windows Event Log</span>
+  </div>
 </section>
 {% endblock %}

@@ -2,29 +2,38 @@
 {% block title %}Dashboard — Sentinel{% endblock %}
 {% block content %}
 <section class="dashboard">
-  <h1>Welcome, {{ user.email }}</h1>
-  {% if user.subscription.cancel_at_period_end %}
-    <p class="badge badge-active">
-      Access until {{ user.subscription.current_period_end.strftime('%d %b %Y') }} (cancelled)
-    </p>
-  {% else %}
-    <p class="badge badge-active">
-      Renews on {{ user.subscription.current_period_end.strftime('%d %b %Y') }}
-    </p>
-  {% endif %}
+  <div class="dashboard-head">
+    <h1>Welcome, {{ user.email }}</h1>
+    {% if user.subscription.cancel_at_period_end %}
+      <span class="badge badge-active">Access until {{ user.subscription.current_period_end.strftime('%d %b %Y') }} (cancelled)</span>
+    {% else %}
+      <span class="badge badge-active">Renews {{ user.subscription.current_period_end.strftime('%d %b %Y') }}</span>
+    {% endif %}
+  </div>
 
   <div class="upload-card">
     <h2>Analyze a log file</h2>
     <p class="muted">
-      Currently supports Linux <code>auth.log</code> (SSH/sudo),
-      Apache/Nginx access logs, firewall logs (iptables/ufw), and Windows
-      Event Log exports (<code>wevtutil</code> text format).
+      Supports Linux <code>auth.log</code> (SSH/sudo), Apache/Nginx access logs,
+      firewall logs (iptables/ufw), and Windows Event Log exports
+      (<code>wevtutil</code> text format).
     </p>
     <form id="analyze-form">
-      <input type="file" id="log-file" name="file" accept=".log,.txt" required>
-      <button class="btn btn-primary" type="submit">Analyze</button>
+      <label class="dropzone" id="dropzone">
+        <span class="dz-icon">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+        </span>
+        <span class="dz-copy">
+          <span class="dz-text" id="dz-text">Drop a log file here, or click to choose one</span>
+          <span class="dz-sub" id="dz-sub">.log or .txt — up to 20 MB</span>
+        </span>
+        <input type="file" id="log-file" name="file" accept=".log,.txt" required>
+      </label>
+      <div class="analyze-actions">
+        <button class="btn btn-primary" type="submit">Analyze</button>
+        <p id="analyze-status" class="muted" hidden></p>
+      </div>
     </form>
-    <p id="analyze-status" class="muted" hidden></p>
   </div>
 
   <div id="results"></div>
@@ -37,18 +46,49 @@
   var form = document.getElementById("analyze-form");
   var status = document.getElementById("analyze-status");
   var results = document.getElementById("results");
+  var dropzone = document.getElementById("dropzone");
+  var fileInput = document.getElementById("log-file");
+  var dzText = document.getElementById("dz-text");
+  var dzSub = document.getElementById("dz-sub");
 
   var SEVERITY_LABEL = {
     critical: "Critical", high: "High", medium: "Medium", low: "Low", info: "Info"
   };
 
+  ["dragenter", "dragover"].forEach(function (evt) {
+    dropzone.addEventListener(evt, function (e) {
+      e.preventDefault();
+      dropzone.classList.add("is-drag");
+    });
+  });
+  ["dragleave", "drop"].forEach(function (evt) {
+    dropzone.addEventListener(evt, function (e) {
+      e.preventDefault();
+      dropzone.classList.remove("is-drag");
+    });
+  });
+  dropzone.addEventListener("drop", function (e) {
+    if (e.dataTransfer.files.length) {
+      fileInput.files = e.dataTransfer.files;
+      updateFilename();
+    }
+  });
+  fileInput.addEventListener("change", updateFilename);
+
+  function updateFilename() {
+    if (fileInput.files.length) {
+      dzText.innerHTML = 'Selected: <span class="dz-filename">' + escapeHtml(fileInput.files[0].name) + "</span>";
+      dzSub.textContent = "Click Analyze, or choose a different file";
+    }
+  }
+
   form.addEventListener("submit", function (e) {
     e.preventDefault();
-    var fileInput = document.getElementById("log-file");
     if (!fileInput.files.length) return;
 
     status.hidden = false;
-    status.textContent = "Analyzing…";
+    status.classList.remove("is-error");
+    status.innerHTML = '<span class="spinner"></span> Analyzing…';
     results.innerHTML = "";
 
     var formData = new FormData();
@@ -69,6 +109,7 @@
       })
       .catch(function (err) {
         status.hidden = false;
+        status.classList.add("is-error");
         status.textContent = err.message;
       });
   });
@@ -76,33 +117,34 @@
   function renderResults(data) {
     if (data.log_type === "unknown") {
       var note = (data.summary && data.summary.note) || "Unrecognized log format.";
-      results.innerHTML = '<div class="placeholder-card"><p>' + escapeHtml(note) + "</p></div>";
+      results.innerHTML = '<div class="placeholder-card">' + escapeHtml(note) + "</div>";
       return;
     }
 
     var summary = data.summary || {};
-    var summaryHtml = '<div class="summary-grid">' + Object.keys(summary).map(function (key) {
-      return (
-        '<div class="summary-stat"><span class="summary-value">' +
-        escapeHtml(String(summary[key])) +
-        '</span><span class="summary-label">' +
-        escapeHtml(key.replace(/_/g, " ")) +
-        "</span></div>"
-      );
-    }).join("") + "</div>";
+    var summaryHtml = '<div class="summary-grid">' + Object.keys(summary)
+      .filter(function (key) { return key !== "note"; })
+      .map(function (key) {
+        return (
+          '<div class="summary-stat"><span class="summary-value">' +
+          escapeHtml(String(summary[key])) +
+          '</span><span class="summary-label">' +
+          escapeHtml(key.replace(/_/g, " ")) +
+          "</span></div>"
+        );
+      }).join("") + "</div>";
 
     var findingsHtml;
     if (!data.findings.length) {
-      findingsHtml = '<p class="muted">No security findings — log looks clean.</p>';
+      findingsHtml = '<div class="clean-note">✓ No security findings — this log looks clean.</div>';
     } else {
-      findingsHtml = data.findings.map(renderFinding).join("");
+      findingsHtml = '<h3 class="findings-head">Findings</h3>' + data.findings.map(renderFinding).join("");
     }
 
     results.innerHTML =
-      "<h2>Results</h2>" +
-      '<p class="muted">' + data.parsed_lines + " of " + data.total_lines + " lines matched known patterns.</p>" +
+      '<div class="results-head"><h2>Results</h2><span class="match-ratio">' +
+      data.parsed_lines + " / " + data.total_lines + " lines matched</span></div>" +
       summaryHtml +
-      "<h3>Findings</h3>" +
       findingsHtml;
   }
 
@@ -124,7 +166,7 @@
       '<div class="finding-card">' +
       '<div class="finding-header">' + badge + "<h4>" + escapeHtml(finding.title) + "</h4></div>" +
       "<p>" + escapeHtml(finding.description) + "</p>" +
-      (meta.length ? '<p class="muted finding-meta">' + escapeHtml(meta.join(" · ")) + "</p>" : "") +
+      (meta.length ? '<p class="finding-meta">' + escapeHtml(meta.join(" · ")) + "</p>" : "") +
       samples +
       "</div>"
     );

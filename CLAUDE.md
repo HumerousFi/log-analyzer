@@ -214,6 +214,28 @@ no JS framework.
   finding-card layout live in `static/style.css` under `.severity-*` /
   `.finding-card`.
 
+## Design system (`static/style.css`)
+
+Dark-only by design (no light-theme tokens, no `prefers-color-scheme`
+handling) — this is a deliberate single visual world, not an oversight.
+Two typefaces, loaded via Google Fonts in `base.html`'s `<head>`:
+**Hanken Grotesk** for all display/body text, **IBM Plex Mono** for
+anything data-shaped — badges, the eyebrow label, log/evidence lines,
+pricing figures, summary-stat numbers. Don't reach for a third typeface;
+the mono face is what gives the "log tool" identity, not decoration.
+
+Severity colors (`--sev-critical/high/medium/low/info`) are **deliberately
+separate** from the brand accent (`--accent`, the teal-cyan used for CTAs,
+links, and the hero glow) — don't reuse the brand accent for a severity
+level again, even for "low"/"info" (it used to alias the brand teal; that
+conflated "this is safe" with "this is our brand color" and was split out
+on purpose).
+
+The landing hero's visual is a real mockup of the app's own
+`.finding-card`/`.severity-*` markup (see `landing.html`), not generic
+hero art — keep it in sync if the actual finding-card styling changes, so
+the hero doesn't quietly start misrepresenting the product.
+
 ## Working in this repo
 
 - Never commit `.env` (real Razorpay test keys live there); `.env.example`

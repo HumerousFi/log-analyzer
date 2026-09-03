@@ -4,11 +4,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Sentinel Log Analyzer{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="site-header">
-    <a class="brand" href="/">🛡️ Sentinel</a>
+    <a class="brand" href="/">
+      <span class="mark">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L4 5v6c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V5l-8-3z" fill="currentColor"/>
+          <path d="M9.5 12.2l1.8 1.8 3.4-3.6" stroke="#04231f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </span>
+      Sentinel
+    </a>
     <nav>
       <a href="/pricing">Pricing</a>
       {% if user %}
@@ -16,12 +27,12 @@
         <a href="/logout">Log out</a>
       {% else %}
         <a href="/login">Log in</a>
-        <a class="btn btn-small" href="/signup">Get started</a>
+        <a class="btn btn-primary btn-small" href="/signup">Get started</a>
       {% endif %}
     </nav>
   </header>
 
-  <main>
+  <main{% block main_class %}{% endblock %}>
     {% block content %}{% endblock %}
   </main>
 
