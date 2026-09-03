@@ -18,7 +18,7 @@ log analysis engine wired up to it — upload a file, get findings.
 | Pricing page + Razorpay Checkout (recurring subscription) | ✅ |
 | Razorpay webhook (reconciles renewals/cancellations) | ✅ |
 | Gated dashboard with log upload + findings UI | ✅ |
-| Log analysis engine | ✅ Linux `auth.log` (SSH/sudo), Apache/Nginx access logs; more formats ⏳ |
+| Log analysis engine | ✅ Linux `auth.log` (SSH/sudo), Apache/Nginx access logs, firewall logs (iptables/ufw); more formats ⏳ |
 
 ## Log analysis engine
 
@@ -88,6 +88,25 @@ verified against a constructed test log built from genuine, publicly
 documented attack signatures (real sqlmap UA string, real SQLi/XSS/path-
 traversal payloads) since that real dataset didn't happen to contain
 active exploitation traffic.
+
+`parser.py` also understands **Linux firewall logs** — iptables/ufw's
+`LOG` target output as it appears in `kern.log`/`ufw.log`/syslog
+(`SRC=`/`DST=`/`PROTO=`/`SPT=`/`DPT=` key=value fields):
+
+- **Port scanning** — 15+ distinct destination ports probed by one source IP
+- **Repeated blocked connections** — 30+ dropped/rejected packets from one
+  source IP (persistent attacker or flood traffic)
+- **Sensitive port probing** — 3+ attempts from one IP against commonly
+  exploited ports (Telnet, RDP, SMB, MySQL, Redis, MongoDB, Docker API,
+  etc.), plus the same aggregate-visibility treatment as web sensitive-path
+  probing for the (very common) case of many different IPs each trying one
+  port once
+
+No public research dataset with real attack traffic in this format was
+readily available (unlike the SSH/web-log datasets above), so this was
+verified against a constructed log using the genuine, standard netfilter
+`LOG` output format with realistic scan/flood/probe patterns rather than
+a downloaded real capture.
 
 Adding a new format: write a `_analyze_<format>(lines)` function that
 returns a `LogAnalysisResponse`, add a signature check to `detect_log_type`,

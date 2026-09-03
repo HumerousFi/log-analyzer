@@ -89,9 +89,10 @@ no JS framework.
   findings," not a log grep tool. `parser.py`'s `analyze_log_content` is a
   dispatcher: `detect_log_type` sniffs the format from a signature regex,
   then hands off to a per-format `_analyze_<format>(lines)` function
-  (`_analyze_linux_auth`, `_analyze_web_access`); an unrecognized format
-  returns an empty findings list with an explanatory `summary.note` rather
-  than an error. Add a new log format by writing another `_analyze_<format>`
+  (`_analyze_linux_auth`, `_analyze_web_access`, `_analyze_firewall`); an
+  unrecognized format returns an empty findings list with an explanatory
+  `summary.note` rather than an error. Add a new log format by writing
+  another `_analyze_<format>`
   function and a signature check in `detect_log_type` — don't try to
   generalize the regexes across formats prematurely, each format's log
   lines are structurally different enough that a shared parser adds
@@ -160,6 +161,20 @@ no JS framework.
     `background_sensitive_path_probe_ips` surface it in aggregate so it
     isn't simply invisible. Don't lower the per-IP threshold to "catch"
     this pattern - it'll just create alert fatigue instead.
+  - **`_analyze_firewall`** (iptables/ufw `LOG` target via kernel/syslog)
+    parses `SRC=`/`DST=`/`PROTO=`/`SPT=`/`DPT=` key=value fields with
+    `FIREWALL_FIELDS_RE`. This relies on netfilter's fixed field ordering
+    (SRC before DST before PROTO before SPT/DPT) via non-greedy `.*?` —
+    it is not a generic key=value parser, so don't reorder the pattern
+    groups without checking real log output. Action (`BLOCK`/`ALLOW`/etc.)
+    comes from `FIREWALL_ACTION_RE` matching ufw's own `[UFW BLOCK]`-style
+    tag or a common `--log-prefix` convention; when no tag is present at
+    all, it **defaults to blocked** — a firewall `LOG` rule is set up to
+    log drops in the overwhelming majority of real configs, so don't
+    change this default to "unknown" without also updating every finding
+    that assumes `blocked` means something. Same aggregate-visibility
+    pattern as web sensitive-path probing applies to `SENSITIVE_PORTS`
+    (Telnet/RDP/SMB/etc.) — see `background_sensitive_port_probes`.
 - **`templates/`** — `base.html` layout plus one template per page
   (landing/signup/login/pricing/dashboard/checkout). `checkout.html` embeds
   Razorpay Checkout.js and posts the payment result to `/billing/verify`.

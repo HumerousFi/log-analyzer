@@ -125,6 +125,41 @@ WEB_ACCESS_SIGNATURE_RE = re.compile(
     r'^\S+ \S+ \S+ \[[^\]]+\] "\S+ \S+ HTTP/[\d.]+" \d{3} \S+'
 )
 
+# --- Linux firewall logs (iptables/ufw LOG target via kernel/syslog) ---
+PORT_SCAN_THRESHOLD = 15  # distinct destination ports from one source IP
+BLOCKED_FLOOD_THRESHOLD = 30  # total blocked packets from one source IP
+SENSITIVE_PORT_THRESHOLD = 3  # hits on commonly-exploited ports from one IP
+
+# Netfilter always emits these key=value fields in this relative order
+# (SRC, then DST, then PROTO, then SPT/DPT when present) regardless of which
+# tool (raw iptables --log-prefix, ufw, firewalld) generated the line - the
+# non-greedy .*? below relies on that fixed ordering, not just presence.
+FIREWALL_FIELDS_RE = re.compile(
+    r"\bSRC=(?P<src>[0-9a-fA-F:.]+)\b.*?"
+    r"\bDST=(?P<dst>[0-9a-fA-F:.]+)\b.*?"
+    r"\bPROTO=(?P<proto>\S+)\b"
+    r"(?:.*?\bSPT=(?P<spt>\d+)\b)?"
+    r"(?:.*?\bDPT=(?P<dpt>\d+)\b)?"
+)
+# ufw tags its own action; plain iptables --log-prefix text is whatever the
+# admin configured, so we recognize the common conventions and otherwise
+# default to "blocked" - a firewall LOG rule is set up to log drops/rejects
+# in the overwhelming majority of real configs, not accepted traffic.
+FIREWALL_ACTION_RE = re.compile(
+    r"\[(?:UFW\s+)?(?P<action>BLOCK|ALLOW|ACCEPT|DENY|DROP|REJECT|AUDIT)\]",
+    re.IGNORECASE,
+)
+# Ports frequently targeted by mass internet scanning/exploitation - not an
+# exhaustive list, just enough to flag "someone is probing infrastructure
+# ports," similar in spirit to SENSITIVE_PATH_RE for web logs.
+SENSITIVE_PORTS = {
+    23: "Telnet", 445: "SMB", 1433: "MSSQL", 2375: "Docker API",
+    3306: "MySQL", 3389: "RDP", 5900: "VNC", 6379: "Redis",
+    9200: "Elasticsearch", 11211: "Memcached", 27017: "MongoDB",
+}
+
+FIREWALL_SIGNATURE_RE = re.compile(r"\bSRC=[0-9a-fA-F:.]+\b.*\bDST=[0-9a-fA-F:.]+\b.*\bPROTO=\S+\b")
+
 
 def _parse_timestamp(line: str) -> datetime.datetime | None:
     match = TIMESTAMP_RE.match(line)
@@ -187,6 +222,9 @@ def detect_log_type(lines: list[str]) -> str:
     web_hits = sum(1 for line in sample if WEB_ACCESS_SIGNATURE_RE.search(line))
     if web_hits >= 3 or web_hits / len(sample) > 0.1:
         return "web_access"
+    firewall_hits = sum(1 for line in sample if FIREWALL_SIGNATURE_RE.search(line))
+    if firewall_hits >= 3 or firewall_hits / len(sample) > 0.1:
+        return "firewall"
     return "unknown"
 
 
@@ -198,6 +236,8 @@ def analyze_log_content(content: str) -> LogAnalysisResponse:
         return _analyze_linux_auth(lines)
     if log_type == "web_access":
         return _analyze_web_access(lines)
+    if log_type == "firewall":
+        return _analyze_firewall(lines)
 
     return LogAnalysisResponse(
         log_type=log_type,
@@ -209,7 +249,8 @@ def analyze_log_content(content: str) -> LogAnalysisResponse:
             "note": (
                 "This doesn't look like a supported log format yet. Currently "
                 "supported: Linux auth.log (sshd/sudo), Apache/Nginx access "
-                "logs. More formats are being added."
+                "logs, firewall logs (iptables/ufw). More formats are being "
+                "added."
             )
         },
     )
@@ -733,6 +774,156 @@ def _build_web_findings(events_by_ip: dict[str, list[dict]]) -> list[Finding]:
                     first_seen=_fmt(min(times)) if times else None,
                     last_seen=_fmt(max(times)) if times else None,
                     sample_lines=[e["line"] for e in auth_posts[:MAX_SAMPLE_LINES]],
+                )
+            )
+
+    return findings
+
+
+def _analyze_firewall(lines: list[str]) -> LogAnalysisResponse:
+    events_by_src: dict[str, list[dict]] = defaultdict(list)
+
+    parsed_lines = 0
+    timestamps: list[datetime.datetime] = []
+
+    for raw_line in lines:
+        match = FIREWALL_FIELDS_RE.search(raw_line)
+        if not match:
+            continue
+        parsed_lines += 1
+
+        ts = _parse_timestamp(raw_line)
+        if ts:
+            timestamps.append(ts)
+
+        action_match = FIREWALL_ACTION_RE.search(raw_line)
+        action = action_match.group("action").upper() if action_match else "BLOCK"
+        blocked = action not in ("ALLOW", "ACCEPT")
+
+        events_by_src[match.group("src")].append(
+            {
+                "dst": match.group("dst"),
+                "proto": match.group("proto"),
+                "spt": match.group("spt"),
+                "dpt": match.group("dpt"),
+                "blocked": blocked,
+                "ts": ts,
+                "line": raw_line.strip(),
+            }
+        )
+
+    findings = _build_firewall_findings(events_by_src)
+    findings.sort(key=lambda f: _severity_rank(f.severity))
+
+    blocked_events = [e for evs in events_by_src.values() for e in evs if e["blocked"]]
+    # Same "distributed, one-off ambient scanning" pattern seen with web
+    # sensitive-path probing - surface it in aggregate rather than
+    # per-source-IP alerting, which would just be internet background noise.
+    sensitive_srcs = {
+        src
+        for src, evs in events_by_src.items()
+        for e in evs
+        if e["blocked"] and e["dpt"] and int(e["dpt"]) in SENSITIVE_PORTS
+    }
+    sensitive_hits_total = sum(
+        1
+        for evs in events_by_src.values()
+        for e in evs
+        if e["blocked"] and e["dpt"] and int(e["dpt"]) in SENSITIVE_PORTS
+    )
+
+    summary = {
+        "total_packets": sum(len(v) for v in events_by_src.values()),
+        "blocked_packets": len(blocked_events),
+        "unique_source_ips": len(events_by_src),
+        "background_sensitive_port_probes": sensitive_hits_total,
+        "background_sensitive_port_probe_ips": len(sensitive_srcs),
+    }
+
+    return LogAnalysisResponse(
+        log_type="firewall",
+        total_lines=len(lines),
+        parsed_lines=parsed_lines,
+        time_range=TimeRange(
+            start=_fmt(min(timestamps)) if timestamps else None,
+            end=_fmt(max(timestamps)) if timestamps else None,
+        ),
+        findings=findings,
+        summary=summary,
+    )
+
+
+def _build_firewall_findings(events_by_src: dict[str, list[dict]]) -> list[Finding]:
+    findings: list[Finding] = []
+
+    for src, events in events_by_src.items():
+        blocked = [e for e in events if e["blocked"]]
+        if not blocked:
+            continue
+
+        distinct_ports = {e["dpt"] for e in blocked if e["dpt"]}
+        if len(distinct_ports) >= PORT_SCAN_THRESHOLD:
+            times = [e["ts"] for e in blocked if e["ts"]]
+            findings.append(
+                Finding(
+                    id=f"port_scan_{src}",
+                    title=f"Port scan from {src}",
+                    severity="high",
+                    category="reconnaissance",
+                    description=(
+                        f"{src} probed {len(distinct_ports)} distinct destination "
+                        "ports, consistent with automated port scanning."
+                    ),
+                    count=len(distinct_ports),
+                    source_ips=[src],
+                    first_seen=_fmt(min(times)) if times else None,
+                    last_seen=_fmt(max(times)) if times else None,
+                    sample_lines=[e["line"] for e in blocked[:MAX_SAMPLE_LINES]],
+                )
+            )
+
+        if len(blocked) >= BLOCKED_FLOOD_THRESHOLD:
+            times = [e["ts"] for e in blocked if e["ts"]]
+            severity = "critical" if len(blocked) >= 500 else "high" if len(blocked) >= 100 else "medium"
+            findings.append(
+                Finding(
+                    id=f"blocked_flood_{src}",
+                    title=f"Repeated blocked connections from {src}",
+                    severity=severity,
+                    category="brute_force",
+                    description=(
+                        f"{len(blocked)} blocked/dropped packets from {src}, "
+                        "consistent with a persistent attacker or scanning/flood "
+                        "traffic."
+                    ),
+                    count=len(blocked),
+                    source_ips=[src],
+                    first_seen=_fmt(min(times)) if times else None,
+                    last_seen=_fmt(max(times)) if times else None,
+                    sample_lines=[e["line"] for e in blocked[:MAX_SAMPLE_LINES]],
+                )
+            )
+
+        sensitive_hits = [e for e in blocked if e["dpt"] and int(e["dpt"]) in SENSITIVE_PORTS]
+        if len(sensitive_hits) >= SENSITIVE_PORT_THRESHOLD:
+            times = [e["ts"] for e in sensitive_hits if e["ts"]]
+            ports = sorted({f"{e['dpt']}/{SENSITIVE_PORTS[int(e['dpt'])]}" for e in sensitive_hits})
+            findings.append(
+                Finding(
+                    id=f"sensitive_port_probing_{src}",
+                    title=f"Sensitive port probing from {src}",
+                    severity="medium",
+                    category="reconnaissance",
+                    description=(
+                        f"{len(sensitive_hits)} connection attempt(s) from {src} "
+                        "targeted commonly-exploited ports: "
+                        f"{', '.join(ports[:MAX_LISTED_ITEMS])}."
+                    ),
+                    count=len(sensitive_hits),
+                    source_ips=[src],
+                    first_seen=_fmt(min(times)) if times else None,
+                    last_seen=_fmt(max(times)) if times else None,
+                    sample_lines=[e["line"] for e in sensitive_hits[:MAX_SAMPLE_LINES]],
                 )
             )
 
