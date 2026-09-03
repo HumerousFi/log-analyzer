@@ -152,18 +152,27 @@ def verify_checkout(
 
     if sub_row.credited_payment_id != razorpay_payment_id:
         # The signature is already cryptographic proof the charge succeeded
-        # (only someone holding RAZORPAY_KEY_SECRET could produce it), so a
-        # network hiccup talking to Razorpay here shouldn't block granting
-        # access. Fetch for the exact period end on a best-effort basis; fall
-        # back to a provisional 1-month grant and let the webhook true it up.
+        # (only someone holding RAZORPAY_KEY_SECRET could produce it), so grant
+        # access unconditionally on it - a network hiccup, or Razorpay's
+        # subscription record not having caught up yet (it transitions
+        # "created" -> "active" asynchronously right after payment, often a
+        # few seconds after our redirect lands here), must never leave a
+        # paying user unprovisioned. Then try to refine the exact period end
+        # via a live fetch, but only adopt it if it actually reflects the
+        # subscription as active - a stale "created" response must not
+        # downgrade the grant we just made. The webhook trues this up later
+        # regardless.
+        sub_row.status = "active"
+        now = datetime.datetime.utcnow()
+        base = sub_row.current_period_end if sub_row.current_period_end and sub_row.current_period_end > now else now
+        sub_row.current_period_end = base + datetime.timedelta(days=30)
+
         try:
             subscription = get_client().subscription.fetch(razorpay_subscription_id)
-            _apply_subscription_state(sub_row, subscription)
+            if subscription.get("status") == "active" and subscription.get("current_end"):
+                _apply_subscription_state(sub_row, subscription)
         except Exception:
-            sub_row.status = "active"
-            now = datetime.datetime.utcnow()
-            base = sub_row.current_period_end if sub_row.current_period_end and sub_row.current_period_end > now else now
-            sub_row.current_period_end = base + datetime.timedelta(days=30)
+            pass
 
         sub_row.credited_payment_id = razorpay_payment_id
         db.commit()

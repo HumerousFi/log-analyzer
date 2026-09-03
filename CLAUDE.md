@@ -54,19 +54,26 @@ no JS framework.
   billing, not a one-time charge). `_get_or_create_plan` lazily creates/finds
   the Plan by matching amount/currency/period rather than hardcoding a Plan
   ID. `/billing/verify` treats a valid payment signature as sufficient proof
-  of a successful charge and grants access on it directly — it also attempts
-  a live `client.subscription.fetch` for the exact renewal date, but that
-  call is best-effort (wrapped in a broad `except Exception`) precisely
-  because gating access on it once caused a real outage: a transient
-  connection reset to Razorpay's API right after a verified payment left a
-  paying user unprovisioned. Don't reintroduce a hard dependency on that
-  fetch succeeding. `/billing/webhook` (`subscription.*` events) reconciles
-  renewals/cancellations/period-end drift from that fallback; both paths are
-  idempotent via `Subscription.credited_payment_id`. Razorpay's subscription
-  entity has no field marking a pending cancellation — `cancel_at_cycle_end`
-  leaves `status` as `"active"` until the period actually ends — so
-  `Subscription.cancel_at_period_end` tracks that intent locally; don't
-  derive cancellation UI state from `status`.
+  of a successful charge and grants a provisional 30-day access window on it
+  **unconditionally**, then tries a live `client.subscription.fetch` to
+  refine the exact renewal date — but only adopts that fetched state if it
+  actually shows `status == "active"` with a `current_end`. Two independent
+  outages taught us not to trust that fetch: (1) a transient connection reset
+  to Razorpay's API right after a verified payment left a paying user
+  unprovisioned when the fetch was in the critical path; (2) even when the
+  fetch *succeeds*, Razorpay's subscription record transitions
+  `"created"` → `"active"` asynchronously - often a few seconds after the
+  browser redirects back here - so an immediate fetch can return a stale,
+  non-active subscription with no `current_end`, and blindly applying that
+  stale state overwrote a legitimate grant. Don't reintroduce a hard
+  dependency on that fetch's result, in either direction - it may fail, or
+  it may succeed with data that isn't current yet. `/billing/webhook`
+  (`subscription.*` events) reconciles renewals/cancellations/period-end
+  drift; both paths are idempotent via `Subscription.credited_payment_id`.
+  Razorpay's subscription entity has no field marking a pending
+  cancellation — `cancel_at_cycle_end` leaves `status` as `"active"` until
+  the period actually ends — so `Subscription.cancel_at_period_end` tracks
+  that intent locally; don't derive cancellation UI state from `status`.
 - **`parser.py` / `models.py`** — the analysis engine. `models.py` defines
   `Finding` (severity/category/description/evidence) and
   `LogAnalysisResponse` — the schema is findings-shaped, not generic
