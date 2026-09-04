@@ -54,6 +54,20 @@ no JS framework.
   server-side session store). Exposes the two auth dependencies every
   protected route should use: `require_user` (logged in) and
   `require_active_subscription` (logged in + `subscription.is_active`).
+  `login_submit` does two things a pentest found missing: it rate-limits
+  (`MAX_FAILURES_PER_IP` / `MAX_FAILURES_PER_EMAIL`, in-memory - fine for
+  this single-process app, resets on restart) and it always runs a bcrypt
+  check even when the email doesn't exist (against `_DUMMY_PASSWORD_HASH`)
+  so the response time doesn't reveal which emails are registered - a live
+  timing test showed a ~90x gap (2ms vs 184ms) before this fix. Don't
+  special-case the "user not found" branch to skip the bcrypt call again.
+  `EMAIL_RE` is deliberately restrictive (`[A-Za-z0-9._%+-]+@...`), not
+  RFC 5322-permissive - a looser local-part let `<script>`/`"`-shaped
+  strings through as "valid emails," which happened to render safely only
+  because every template autoescapes (including inside `checkout.html`'s
+  `<script>` block, where HTML-escaping is incidental protection, not
+  designed protection). Don't loosen it without re-checking every place
+  `user.email` is rendered.
 - **`db.py`** — SQLAlchemy 2.0 models, `User` 1:1 `Subscription`. Notable:
   `Subscription.is_active` is a computed `@property` derived from
   `current_period_end`, not a stored column — don't try to set it or filter
@@ -82,6 +96,13 @@ no JS framework.
   cancellation — `cancel_at_cycle_end` leaves `status` as `"active"` until
   the period actually ends — so `Subscription.cancel_at_period_end` tracks
   that intent locally; don't derive cancellation UI state from `status`.
+  `start_checkout` reuses an existing `"created"` (unpaid) subscription
+  instead of calling `client.subscription.create` unconditionally - a
+  pentest found that every hit (double-click, retry, direct repeated POST)
+  spawned a brand new orphaned Razorpay subscription object with no bound.
+  It also short-circuits to a dashboard redirect if the user is already
+  `is_active`. Don't drop either check to "simplify" this back to always
+  creating.
 - **`parser.py` / `models.py`** — the analysis engine. `models.py` defines
   `Finding` (severity/category/description/evidence) and
   `LogAnalysisResponse` — the schema is findings-shaped, not generic

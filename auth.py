@@ -1,5 +1,7 @@
 import os
 import re
+import time
+from collections import defaultdict
 
 import bcrypt
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -20,11 +22,35 @@ COOKIE_SECURE = APP_BASE_URL.startswith("https://")
 
 _serializer = URLSafeTimedSerializer(SECRET_KEY, salt="session")
 
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# A reasonably strict-but-normal email shape: this is deliberately narrower
+# than RFC 5322 (which technically allows quoted strings, etc.) because a
+# permissive local-part let structurally dangerous characters (<, >, ", ')
+# through as a "valid email" - harmless today only because every template
+# that renders it happens to autoescape, which is incidental, not designed,
+# protection. Don't loosen this without checking every place email is
+# rendered (including inside <script> blocks, e.g. checkout.html).
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 templates = Jinja2Templates(directory="templates")
 
 router = APIRouter()
+
+# --- Login rate limiting (in-memory - fine for this single-process app) ---
+LOGIN_WINDOW_SECONDS = 15 * 60
+MAX_FAILURES_PER_IP = 15  # across all target emails - catches enumeration/spray
+MAX_FAILURES_PER_EMAIL = 5  # against one account - catches targeted brute force
+
+_failures_by_ip: dict[str, list[float]] = defaultdict(list)
+_failures_by_email: dict[str, list[float]] = defaultdict(list)
+
+# A fixed dummy hash checked when the submitted email doesn't exist, so a
+# nonexistent-account login takes the same time as a wrong-password one
+# (bcrypt.checkpw's cost dominates the response time either way). Without
+# this, a login attempt against a real email measurably takes ~100x longer
+# than one against a fake email - a live-verified timing side channel that
+# lets an attacker enumerate registered accounts before ever brute-forcing
+# a password.
+_DUMMY_PASSWORD_HASH = bcrypt.hashpw(b"not-a-real-password", bcrypt.gensalt()).decode("utf-8")
 
 
 def hash_password(password: str) -> str:
@@ -36,6 +62,30 @@ def verify_password(password: str, password_hash: str) -> bool:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
     except ValueError:
         return False
+
+
+def _prune(timestamps: list[float], now: float) -> list[float]:
+    return [t for t in timestamps if now - t < LOGIN_WINDOW_SECONDS]
+
+
+def _is_login_rate_limited(ip: str, email: str) -> bool:
+    now = time.time()
+    ip_hits = _prune(_failures_by_ip[ip], now)
+    email_hits = _prune(_failures_by_email[email], now)
+    _failures_by_ip[ip] = ip_hits
+    _failures_by_email[email] = email_hits
+    return len(ip_hits) >= MAX_FAILURES_PER_IP or len(email_hits) >= MAX_FAILURES_PER_EMAIL
+
+
+def _record_login_failure(ip: str, email: str) -> None:
+    now = time.time()
+    _failures_by_ip[ip].append(now)
+    _failures_by_email[email].append(now)
+
+
+def _clear_login_failures(ip: str, email: str) -> None:
+    _failures_by_ip.pop(ip, None)
+    _failures_by_email.pop(email, None)
 
 
 def create_session_cookie(user_id: int) -> str:
@@ -119,10 +169,15 @@ def signup_submit(
         )
 
     if db.query(User).filter(User.email == email).first():
+        # Deliberately vaguer than "an account with that email already
+        # exists" - this app has no email-verification flow to fully close
+        # the account-enumeration gap (that would require confirming
+        # signups by email), so this is a partial mitigation: it stops
+        # short of directly confirming the email is registered.
         return templates.TemplateResponse(
             request,
             "signup.html",
-            {"error": "An account with that email already exists."},
+            {"error": "Couldn't create an account with those details. If you already have one, try logging in."},
             status_code=400,
         )
 
@@ -152,9 +207,29 @@ def login_submit(
     db: Session = Depends(get_db),
 ):
     email = email.strip().lower()
+    ip = request.client.host if request.client else "unknown"
+
+    if _is_login_rate_limited(ip, email):
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": "Too many attempts. Try again in a few minutes."},
+            status_code=429,
+        )
+
     user = db.query(User).filter(User.email == email).first()
 
-    if user is None or not verify_password(password, user.password_hash):
+    # Always run a bcrypt check, even for a nonexistent user, against a
+    # fixed dummy hash - so this branch takes the same time either way and
+    # doesn't leak which emails are registered via response timing.
+    if user is None:
+        verify_password(password, _DUMMY_PASSWORD_HASH)
+        password_ok = False
+    else:
+        password_ok = verify_password(password, user.password_hash)
+
+    if not password_ok:
+        _record_login_failure(ip, email)
         return templates.TemplateResponse(
             request,
             "login.html",
@@ -162,6 +237,7 @@ def login_submit(
             status_code=400,
         )
 
+    _clear_login_failures(ip, email)
     response = RedirectResponse(url="/dashboard", status_code=303)
     set_session_cookie(response, user.id)
     return response

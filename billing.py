@@ -100,28 +100,36 @@ def start_checkout(
 ):
     client = get_client()
     sub_row = _get_or_create_subscription_row(db, user)
-    plan_id = _get_or_create_plan(client)
 
-    subscription = client.subscription.create(
-        {
-            "plan_id": plan_id,
-            "customer_notify": 1,
-            "total_count": PLAN_TOTAL_COUNT,
-            "notes": {"user_id": str(user.id)},
-        }
-    )
+    if sub_row.is_active:
+        return RedirectResponse(url="/dashboard", status_code=303)
 
-    sub_row.razorpay_subscription_id = subscription["id"]
-    sub_row.status = subscription.get("status", "created")
-    sub_row.cancel_at_period_end = False
-    db.commit()
+    # Only create a new Razorpay subscription if there isn't already one
+    # sitting unpaid ("created") for this user - otherwise every retry,
+    # double-click, or direct repeated POST to this endpoint spins up a
+    # brand new orphaned subscription object on the Razorpay account with
+    # no bound on how many accumulate.
+    if not (sub_row.razorpay_subscription_id and sub_row.status == "created"):
+        plan_id = _get_or_create_plan(client)
+        subscription = client.subscription.create(
+            {
+                "plan_id": plan_id,
+                "customer_notify": 1,
+                "total_count": PLAN_TOTAL_COUNT,
+                "notes": {"user_id": str(user.id)},
+            }
+        )
+        sub_row.razorpay_subscription_id = subscription["id"]
+        sub_row.status = subscription.get("status", "created")
+        sub_row.cancel_at_period_end = False
+        db.commit()
 
     return templates.TemplateResponse(
         request,
         "checkout.html",
         {
             "key_id": RAZORPAY_KEY_ID,
-            "subscription_id": subscription["id"],
+            "subscription_id": sub_row.razorpay_subscription_id,
             "user_email": user.email,
         },
     )
