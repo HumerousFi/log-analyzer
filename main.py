@@ -11,9 +11,10 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+import account
 import auth
 import billing
-from auth import APP_BASE_URL, SECRET_KEY, get_current_user, require_active_subscription
+from auth import APP_BASE_URL, COOKIE_SECURE, SECRET_KEY, get_current_user, require_active_subscription
 from db import User, get_db, init_db
 from models import LogAnalysisResponse
 from parser import analyze_log_content
@@ -24,11 +25,74 @@ app = FastAPI(title="Security Log Analyzer")
 # one large file can't tie up a worker thread indefinitely or exhaust memory.
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 
+# Locked down site-wide - no inline/external scripts, no framing, no cross-
+# origin fetches. style-src needs 'unsafe-inline' for the few inline
+# style="" attributes in templates (e.g. the landing hero mockup); that's a
+# much narrower risk than allowing inline/unsafe scripts, which stay
+# disallowed everywhere.
+CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src https://fonts.gstatic.com; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+
+# /billing/checkout is the one page that has to embed Razorpay's Checkout.js
+# widget, and live-testing showed it needs real relaxation, not just source
+# allowlisting: script-src additionally needs 'unsafe-eval' and
+# 'unsafe-inline' - without them, Checkout.js loads and its iframe/DOM get
+# built, but the modal silently stays display:none forever (no console
+# error, no exception - it just never shows), which strongly suggests it
+# uses eval()/new Function() or inline event handlers internally. It also
+# needs the full *.razorpay.com wildcard on script/connect/img/frame-src
+# (a risk-detection bundle loads from cdn.razorpay.com, telemetry posts to
+# lumberjack.razorpay.com). Everything NOT confirmed necessary - clickjacking
+# protection (frame-ancestors, X-Frame-Options) and Permissions-Policy -
+# stays on, even on this page: those were only removed transiently while
+# bisecting the actual cause and neither one turned out to matter, so don't
+# assume they need to go too if this policy ever needs adjusting again.
+CHECKOUT_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.razorpay.com; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src https://fonts.gstatic.com; "
+    "img-src 'self' data: https://*.razorpay.com; "
+    "connect-src 'self' https://*.razorpay.com; "
+    "frame-src https://*.razorpay.com; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    is_checkout = request.url.path == "/billing/checkout"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    response.headers["Content-Security-Policy"] = CHECKOUT_CSP if is_checkout else CSP
+    # HSTS only makes sense once we're actually serving over https - sending
+    # it over plain http (local dev) does nothing but risks confusing a
+    # future switch back to http during testing.
+    if COOKIE_SECURE:
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    return response
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 app.include_router(auth.router)
 app.include_router(billing.router)
+app.include_router(account.router)
 
 
 @app.on_event("startup")

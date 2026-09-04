@@ -23,6 +23,12 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Only set once 2FA is actually enabled - a secret can exist transiently
+    # during setup (before the user confirms a code) without totp_enabled
+    # being true yet; login only checks totp_enabled.
+    totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=datetime.datetime.utcnow
     )
@@ -30,6 +36,7 @@ class User(Base):
     subscription: Mapped["Subscription"] = relationship(
         back_populates="user", uselist=False, cascade="all, delete-orphan"
     )
+    backup_codes: Mapped[list["BackupCode"]] = relationship(cascade="all, delete-orphan")
 
 
 class Subscription(Base):
@@ -57,6 +64,25 @@ class Subscription(Base):
         return bool(
             self.current_period_end and self.current_period_end > datetime.datetime.utcnow()
         )
+
+
+class BackupCode(Base):
+    """One-time 2FA recovery codes, generated in a batch when 2FA is enabled.
+
+    Stored hashed (bcrypt, via auth.hash_password) rather than in plaintext -
+    these grant login the same as a TOTP code would, so they need the same
+    protection as a password.
+    """
+
+    __tablename__ = "backup_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    code_hash: Mapped[str] = mapped_column(String(255))
+    used: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, default=datetime.datetime.utcnow
+    )
 
 
 def init_db() -> None:

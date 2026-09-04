@@ -34,13 +34,14 @@ Single-process FastAPI app, SQLite by default (`DATABASE_URL` swaps to
 Postgres later), server-rendered Jinja2 templates — no frontend build step,
 no JS framework.
 
-- **`main.py`** — app wiring only: mounts `auth.router` and `billing.router`,
-  defines `/`, `/pricing`, `/dashboard`, and `/analyze`. A global
-  `StarletteHTTPException` handler turns any `HTTPException(status_code=303,
-  headers={"Location": ...})` into an actual redirect — this is the
-  mechanism `auth.require_user` / `require_active_subscription` use to bounce
-  unauthenticated or unpaid users to `/login` or `/pricing`, so raise that
-  pattern rather than `RedirectResponse` inside a dependency.
+- **`main.py`** — app wiring: mounts `auth.router`, `billing.router`, and
+  `account.router`, defines `/`, `/pricing`, `/dashboard`, and `/analyze`. A
+  global `StarletteHTTPException` handler turns any
+  `HTTPException(status_code=303, headers={"Location": ...})` into an actual
+  redirect — this is the mechanism `auth.require_user` /
+  `require_active_subscription` use to bounce unauthenticated or unpaid
+  users to `/login` or `/pricing`, so raise that pattern rather than
+  `RedirectResponse` inside a dependency.
   `/analyze` reads the upload in bounded chunks up to `MAX_UPLOAD_BYTES`
   (20 MB, raising 413 past it) and runs `analyze_log_content` via
   `run_in_threadpool` rather than calling it directly - it's CPU-bound and
@@ -49,6 +50,19 @@ no JS framework.
   (confirmed: a 1.75s landing-page delay during one large upload) for the
   duration. Don't call `analyze_log_content` (or any future
   `_analyze_<format>`) synchronously from this route again.
+  The `security_headers` middleware sends CSP/`X-Frame-Options`/
+  `X-Content-Type-Options`/`Referrer-Policy`/`Permissions-Policy` (+HSTS once
+  over https) on every response **except** `/billing/checkout`, which gets
+  `CHECKOUT_CSP` instead of `CSP` — live-testing (actually completing a test
+  payment, not just checking headers) showed Razorpay's Checkout.js needs
+  `'unsafe-eval'`/`'unsafe-inline'` in `script-src` (without them the modal
+  builds its iframe but silently stays `display:none` forever - no console
+  error, no exception) plus the full `*.razorpay.com` wildcard on
+  script/connect/img/frame-src, not just `checkout.razorpay.com` (it also
+  loads a bundle from `cdn.razorpay.com` and posts to
+  `lumberjack.razorpay.com`). If you touch either CSP string, re-run an
+  actual checkout afterward - a "no console errors" check is not enough,
+  the failure mode here is completely silent.
 - **`auth.py`** — signup/login/logout, bcrypt password hashing, and
   itsdangerous-signed session cookies (`SESSION_COOKIE`, 30-day max age, no
   server-side session store). Exposes the two auth dependencies every
@@ -68,10 +82,61 @@ no JS framework.
   `<script>` block, where HTML-escaping is incidental protection, not
   designed protection). Don't loosen it without re-checking every place
   `user.email` is rendered.
-- **`db.py`** — SQLAlchemy 2.0 models, `User` 1:1 `Subscription`. Notable:
-  `Subscription.is_active` is a computed `@property` derived from
-  `current_period_end`, not a stored column — don't try to set it or filter
-  on it in a SQL query, and don't reintroduce it as a mapped column.
+  `auth.py` also owns email verification, password reset, and the 2FA
+  *challenge* step of login (2FA *management* - setup/disable - lives in
+  `account.py`, see below). Email verification/reset tokens are stateless
+  itsdangerous tokens (like the session cookie), not DB rows - the reset
+  token's trick for being effectively single-use: it embeds a short
+  fingerprint (`_password_fingerprint`, a truncated sha256) of the
+  password hash at issue time, and `read_password_reset_token` recomputes
+  it from the *current* hash and rejects a mismatch - so using the token
+  (or changing the password any other way) invalidates it without needing
+  a revocation table. Don't "simplify" this back to just checking
+  signature+expiry. When `login_submit` sees `user.totp_enabled`, it does
+  **not** call `set_session_cookie` - it sets `PENDING_2FA_COOKIE` instead
+  and redirects to `/login/2fa`, which is the only place that calls
+  `set_session_cookie` for a 2FA account. Don't let any code path grant a
+  real session before the 2FA challenge passes.
+- **`account.py`** — logged-in-only self-service: `/account` (email
+  verified/2FA status), `/account/2fa/setup` (GET generates a fresh
+  `totp_secret` and stores it *unconfirmed* - `totp_enabled` only flips
+  true after the POST confirms a real code, so a half-finished setup never
+  silently enables 2FA with a secret the user never actually scanned),
+  `/account/2fa/disable` (requires the account password, not just being
+  logged in), `/account/2fa/regenerate-backup-codes`. Every route here
+  takes `user: User = Depends(require_user)` - every `TemplateResponse`
+  call must include `"user": user` in its context or `base.html`'s nav
+  silently renders the logged-out state (real bug hit here: three routes
+  omitted it, and the nav showed "Log in / Get started" for an
+  authenticated user - `require_user` gates the *page*, it doesn't feed
+  the nav).
+- **`twofactor.py`** — TOTP secret/QR (via `pyotp`) and backup-code
+  generation/verification, shared by `auth.py` (login challenge) and
+  `account.py` (setup/disable). QR codes use `qrcode.image.svg.SvgPathImage`
+  specifically, not the plain `SvgImage` factory - `SvgImage`'s output has
+  no `viewBox` and renders **blank** the moment CSS gives it a pixel size
+  different from its native mm-based one (verified live: it does, in every
+  browser, silently). `SvgPathImage` has a real `viewBox` and scales
+  correctly. Backup codes are bcrypt-hashed via `security.py`, same as
+  passwords - they grant login, so they need the same protection.
+- **`security.py`** — just `hash_password`/`verify_password` (bcrypt),
+  factored out of `auth.py` so `twofactor.py` can hash backup codes without
+  creating an `auth.py` ⇄ `twofactor.py` import cycle (`auth.py` imports
+  from `twofactor.py` for the login 2FA challenge).
+- **`email_utils.py`** — `send_email` logs to the console instead of
+  sending when `SMTP_HOST` is unset, so verification/reset flows are
+  testable in local dev without a real mail provider. Don't add a hard
+  failure when SMTP isn't configured; that fallback is intentional.
+- **`db.py`** — SQLAlchemy 2.0 models, `User` 1:1 `Subscription`, `User` 1:N
+  `BackupCode`. Notable: `Subscription.is_active` is a computed `@property`
+  derived from `current_period_end`, not a stored column — don't try to set
+  it or filter on it in a SQL query, and don't reintroduce it as a mapped
+  column. `User.totp_secret`/`totp_enabled`/`email_verified` and the whole
+  `backup_codes` table were added after the initial schema - on an existing
+  SQLite file, `init_db()`'s `create_all` adds new *tables* fine but won't
+  add new *columns* to `users`, so a manual `ALTER TABLE` is needed there
+  (see the git history around when these were added for the exact
+  statements).
 - **`billing.py`** — Razorpay **Subscriptions** integration (real recurring
   billing, not a one-time charge). `_get_or_create_plan` lazily creates/finds
   the Plan by matching amount/currency/period rather than hardcoding a Plan

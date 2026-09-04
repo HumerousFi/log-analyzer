@@ -11,6 +11,15 @@
     {% endif %}
   </div>
 
+  {% if not user.email_verified %}
+    <div class="notice-banner">
+      <span>Verify your email to make sure you can receive account and billing notices.</span>
+      <form method="post" action="/resend-verification">
+        <button class="btn-link" type="submit">Resend email</button>
+      </form>
+    </div>
+  {% endif %}
+
   <div class="upload-card">
     <h2>Analyze a log file</h2>
     <p class="muted">

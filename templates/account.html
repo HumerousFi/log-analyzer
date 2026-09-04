@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Account — Sentinel{% endblock %}
+{% block content %}
+<section class="account">
+  <h1>Account</h1>
+
+  <div class="panel">
+    <h2>Email</h2>
+    <p class="muted">{{ user.email }}</p>
+    <div class="panel-row">
+      {% if user.email_verified %}
+        <span class="badge badge-active">Verified</span>
+      {% else %}
+        <span class="badge">Not verified</span>
+        <form method="post" action="/resend-verification">
+          <button class="btn-link" type="submit">Resend verification email</button>
+        </form>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Two-factor authentication</h2>
+    {% if error == "code" %}<p class="error">Incorrect code.</p>{% endif %}
+    {% if user.totp_enabled %}
+      <p class="muted">2FA is on. You have {{ unused_backup_codes }} unused backup code{{ "s" if unused_backup_codes != 1 else "" }}.</p>
+      <div class="panel-row">
+        <form method="post" action="/account/2fa/regenerate-backup-codes">
+          <input type="text" name="code" placeholder="Current code" inputmode="numeric" required>
+          <button class="btn btn-ghost btn-small" type="submit">New backup codes</button>
+        </form>
+      </div>
+      <div class="panel-row">
+        <form method="post" action="/account/2fa/disable">
+          <input type="password" name="password" placeholder="Your password" required>
+          <button class="btn btn-ghost btn-small" type="submit">Disable 2FA</button>
+        </form>
+      </div>
+      {% if error and error != "code" %}<p class="error">{{ error }}</p>{% endif %}
+    {% else %}
+      <p class="muted">Add a second step at login using an authenticator app (Google Authenticator, 1Password, Authy, etc.).</p>
+      <a class="btn btn-primary btn-small" href="/account/2fa/setup">Enable 2FA</a>
+    {% endif %}
+  </div>
+
+  <p class="muted"><a href="/dashboard">Back to dashboard</a></p>
+</section>
+{% endblock %}

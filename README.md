@@ -15,6 +15,7 @@ log analysis engine wired up to it — upload a file, get findings.
 | --- | --- |
 | Landing page | ✅ |
 | Signup / login (email + password, session cookie) | ✅ |
+| Email verification, password reset, 2FA (TOTP + backup codes) | ✅ |
 | Pricing page + Razorpay Checkout (recurring subscription) | ✅ |
 | Razorpay webhook (reconciles renewals/cancellations) | ✅ |
 | Gated dashboard with log upload + findings UI | ✅ |
@@ -248,11 +249,41 @@ testing), not just a code read. What that found and fixed:
   single line, thousands of unmatched parens) against the parser's regexes
   processed in single-digit milliseconds with no catastrophic backtracking.
 
-**Known open gaps, not yet addressed:** no email verification or password
-reset flow (so the signup-enumeration message above is a partial
-mitigation, not a full fix — closing it properly needs an email-sending
-flow this app doesn't have yet), no 2FA, and no CSP/`X-Frame-Options`/other
-security response headers.
+Since then, the three gaps above have been closed:
+
+- **Email verification and password reset** (`auth.py`, `email_utils.py`) —
+  signup sends a signed, 24-hour verification link (non-blocking: it doesn't
+  gate access, just shows a dashboard reminder banner until clicked).
+  `/forgot-password` sends a signed, 1-hour, single-use reset link and gives
+  an identical response whether or not the account exists — this is what
+  actually closes the account-enumeration gap the signup-duplicate message
+  couldn't (that message still has to reveal *something* to stay usable
+  without an email-confirmation gate; this endpoint has no such constraint).
+  The reset token embeds a fingerprint of the current password hash, so
+  using it (or changing the password any other way) invalidates it —
+  verified by resetting a password then replaying the same link, which
+  correctly failed. Without real SMTP configured (`SMTP_HOST` etc. in
+  `.env`), emails log to the console instead of failing, so this is testable
+  in local dev without a mail provider.
+- **2FA** (`twofactor.py`, `account.py`) — TOTP via any standard
+  authenticator app, set up from `/account`, plus 8 one-time backup codes
+  shown once at enrollment (stored bcrypt-hashed, like passwords). Login
+  with 2FA enabled is two-step: a correct password sets a short-lived
+  `pending_2fa` cookie and redirects to `/login/2fa`, not a real session —
+  verified that hitting `/dashboard` with only that pending cookie still
+  redirects to login, i.e. password alone can't skip the second factor.
+- **Security response headers** (`main.py`) — CSP, `X-Frame-Options: DENY`,
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`,
+  and HSTS (once actually served over https) on every response. `/billing/checkout`
+  runs a deliberately looser CSP than the rest of the site: live-testing
+  showed Razorpay's Checkout.js needs `'unsafe-eval'`/`'unsafe-inline'` in
+  `script-src` (without them the payment modal builds its iframe but
+  silently stays hidden forever — no console error, no exception) plus the
+  full `*.razorpay.com` wildcard, not just `checkout.razorpay.com` (it also
+  loads a bundle from `cdn.razorpay.com` and posts telemetry to
+  `lumberjack.razorpay.com`). This was caught by actually completing a real
+  test-mode payment after adding CSP, not just checking response headers —
+  don't trust a "looks fine" without doing that again if this policy changes.
 
 ## Deployment
 
@@ -294,12 +325,17 @@ docker run -p 8000:8000 --env-file .env sentinel
 ## Project layout
 
 ```
-main.py       FastAPI app, routes, wiring
-auth.py       signup/login/logout, password hashing, session cookies
-billing.py    Razorpay subscription checkout, cancellation, webhook handler
-db.py         SQLAlchemy models (User, Subscription) + SQLite setup
-templates/    Jinja2 pages (landing, signup, login, pricing, dashboard)
-static/       stylesheet
-models.py     Pydantic response schema for /analyze (Finding, LogAnalysisResponse)
-parser.py     log parsing/detection logic — see "Log analysis engine" above
+main.py         FastAPI app, routes, wiring, security response headers
+auth.py         signup/login (incl. 2FA challenge)/logout, email verification,
+                password reset, session cookies, login rate limiting
+account.py      /account settings page, 2FA setup/disable
+twofactor.py    TOTP secret/QR generation, code verification, backup codes
+security.py     password hashing (shared by auth.py and twofactor.py)
+email_utils.py  SMTP sending, with a console-log fallback for local dev
+billing.py      Razorpay subscription checkout, cancellation, webhook handler
+db.py           SQLAlchemy models (User, Subscription, BackupCode) + SQLite setup
+templates/      Jinja2 pages (landing, signup, login, pricing, dashboard, account, ...)
+static/         stylesheet
+models.py       Pydantic response schema for /analyze (Finding, LogAnalysisResponse)
+parser.py       log parsing/detection logic — see "Log analysis engine" above
 ```

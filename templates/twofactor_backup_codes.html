@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Your backup codes — Sentinel{% endblock %}
+{% block content %}
+<section class="account">
+  <h1>Save your backup codes</h1>
+  <div class="panel">
+    <p class="muted">
+      Each code works once, if you lose access to your authenticator app.
+      Store them somewhere safe — this is the only time they're shown in full.
+    </p>
+    <div class="backup-codes">
+      {% for code in backup_codes %}<span>{{ code }}</span>{% endfor %}
+    </div>
+    <a class="btn btn-primary" href="/account">I've saved these — continue</a>
+  </div>
+</section>
+{% endblock %}

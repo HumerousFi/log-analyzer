@@ -452,6 +452,65 @@ input::placeholder { color: var(--muted); }
 .upload-card h2 { font-size: 1.15rem; margin-bottom: 0.4rem; }
 .upload-card > .muted { margin: 0 0 1.3rem; }
 
+/* ---------- account / 2FA ---------- */
+.account { max-width: 560px; margin: 0 auto; }
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.7rem 1.8rem;
+  margin: 1.5rem 0;
+  box-shadow: var(--shadow-card);
+}
+.panel h2 { font-size: 1.1rem; margin-bottom: 0.3rem; }
+.panel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 1.1rem;
+}
+.panel-row form { display: flex; gap: 0.6rem; align-items: center; }
+.panel-row input { padding: 0.55rem 0.7rem; font-size: 0.9rem; max-width: 160px; }
+
+.qr-card {
+  background: #fff;
+  border-radius: var(--radius-sm);
+  padding: 1rem;
+  display: inline-block;
+  margin: 1.2rem 0;
+}
+.qr-card svg { display: block; width: 200px; height: 200px; }
+
+.secret-key {
+  font-family: var(--font-mono);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.9rem;
+  word-break: break-all;
+  font-size: 0.92rem;
+  margin: 0.8rem 0 1.4rem;
+}
+
+.backup-codes {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.6rem;
+  margin: 1.2rem 0;
+  font-family: var(--font-mono);
+}
+.backup-codes span {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.8rem;
+  text-align: center;
+  font-size: 0.95rem;
+}
+@media (max-width: 480px) { .backup-codes { grid-template-columns: 1fr; } }
+
 .dropzone {
   display: flex;
   align-items: center;
@@ -586,6 +645,22 @@ input::placeholder { color: var(--muted); }
   margin: 1.5rem 0;
   color: var(--text-dim);
 }
+
+.notice-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  color: var(--sev-medium);
+  background: rgba(255, 209, 102, 0.1);
+  border: 1px solid rgba(255, 209, 102, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 0.8rem 1rem;
+  font-size: 0.9rem;
+  margin: 1.2rem 0 0;
+}
+.notice-banner form { margin: 0; }
 
 .clean-note {
   display: flex;
