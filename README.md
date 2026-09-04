@@ -20,6 +20,13 @@ log analysis engine wired up to it — upload a file, get findings.
 | Gated dashboard with log upload + findings UI | ✅ |
 | Log analysis engine | ✅ Linux `auth.log`, Apache/Nginx, firewall (iptables/ufw), Windows Event Log |
 
+Visual design: **Hanken Grotesk** (display/body) + **IBM Plex Mono** (badges,
+pricing, log/evidence lines, summary numbers), a dark-only "security
+monitoring" palette with severity colors kept independent of the brand
+accent, and a landing hero built around a real mockup of the app's own
+finding-card UI rather than generic hero art. See the "Design system" note
+in `CLAUDE.md` before changing colors/type.
+
 ## Log analysis engine
 
 `parser.py` currently understands **Linux `auth.log`** — both classic
@@ -197,6 +204,55 @@ intent locally for UI messaging.
 In production, generate the equivalent **live** key pair once KYC is
 approved, and add a live webhook endpoint in the Dashboard pointing at
 `https://<your-domain>/billing/webhook`.
+
+## Security
+
+This app has been through a real pentest pass (nmap recon, manual/scripted
+auth and payment-logic testing, injection attempts, regex-DoS stress
+testing), not just a code read. What that found and fixed:
+
+- **Login is rate-limited** (`auth.py`) — in-memory, per-IP (15 failures /
+  15 min, catches enumeration/spray across many emails) and per-email (5 /
+  15 min, catches targeted brute force). Resets on process restart, which
+  is an accepted tradeoff for a single-process app with no Redis.
+- **No timing side-channel on login** — a login attempt against a
+  nonexistent email always runs a real bcrypt check (against a fixed dummy
+  hash) so it takes the same ~180ms as a real account. Before this fix, a
+  nonexistent account resolved in ~2ms versus ~184ms for a real one — a
+  measured ~90x gap an attacker could use to enumerate registered emails
+  without ever guessing a password.
+- **Email validation is intentionally strict**
+  (`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`) — a looser pattern
+  used to accept `<script>...</script>@x.com` and `x"};alert(1);//@x.com`
+  as "valid emails." Both rendered inertly everywhere they're used
+  (Jinja2 autoescaping, including inside `checkout.html`'s inline
+  `<script>` block), but that was incidental protection from the template
+  engine, not something the input validation was actually designed to
+  provide.
+- **Payment/subscription ownership can't be replayed across accounts** —
+  verified by computing a cryptographically valid Razorpay signature for a
+  subscription ID a test account didn't own and confirming `/billing/verify`
+  still rejects it. Confirmed safe, no fix needed.
+- **`/billing/checkout` no longer creates unbounded Razorpay subscriptions**
+  — it used to call `client.subscription.create` on every hit with no
+  idempotency check, so retries/double-clicks/direct repeated POSTs spun up
+  orphaned subscription objects with no limit. It now reuses an existing
+  unpaid ("created") subscription and short-circuits to the dashboard if
+  the user is already active.
+- **SQL injection, session-cookie tampering, path traversal, CSRF, CORS,
+  and regex denial-of-service** were all tested directly and found not
+  exploitable — SQLAlchemy's ORM parameterizes queries, the signed session
+  cookie is correctly rejected when tampered with, `/static/` and direct
+  paths don't leak `.env`/`app.db`, `SameSite=Lax` blocks cross-site POST,
+  no permissive CORS headers are set, and adversarial payloads (a 50KB
+  single line, thousands of unmatched parens) against the parser's regexes
+  processed in single-digit milliseconds with no catastrophic backtracking.
+
+**Known open gaps, not yet addressed:** no email verification or password
+reset flow (so the signup-enumeration message above is a partial
+mitigation, not a full fix — closing it properly needs an email-sending
+flow this app doesn't have yet), no 2FA, and no CSP/`X-Frame-Options`/other
+security response headers.
 
 ## Deployment
 
