@@ -302,6 +302,28 @@ docker build -t sentinel .
 docker run -p 8000:8000 --env-file .env sentinel
 ```
 
+**Self-hosted VPS (Docker Compose + Caddy)** — what this repo is actually
+set up for via `docker-compose.yml` and `Caddyfile`: one container runs the
+app, a second runs Caddy as a reverse proxy that gets you real HTTPS
+automatically (via Let's Encrypt) — including with no domain of your own,
+using a free [sslip.io](https://sslip.io) hostname that embeds your
+server's IP (e.g. `203.0.113.42` → `203-0-113-42.sslip.io`), since that's a
+real public DNS name Let's Encrypt can issue a cert for.
+
+```bash
+# on the VPS, after installing Docker (curl -fsSL https://get.docker.com | sh)
+git clone <this repo> sentinel && cd sentinel
+cp .env.example .env
+# edit .env: set SECRET_KEY (openssl rand -hex 32), DOMAIN (see above),
+# APP_BASE_URL=https://$DOMAIN, DATABASE_URL=sqlite:////app/data/app.db
+docker compose up -d --build
+```
+
+`DOMAIN` is read by both `Caddyfile` (which host to request a cert for) and
+docker compose's own `.env` interpolation — one file covers both. SQLite
+persists in the named `app-data` volume (mounted at `/app/data`), so
+`docker compose down` / redeploys don't wipe user accounts.
+
 **Deploy-readiness checklist** (the app enforces some of this itself):
 
 - Set a real, random `SECRET_KEY` in the host's env vars — the app refuses

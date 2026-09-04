@@ -127,6 +127,16 @@ no JS framework.
   sending when `SMTP_HOST` is unset, so verification/reset flows are
   testable in local dev without a real mail provider. Don't add a hard
   failure when SMTP isn't configured; that fallback is intentional.
+- **`docker-compose.yml` / `Caddyfile`** — the self-hosted VPS deploy path
+  (see README's Deployment section for the full walkthrough): one container
+  runs the app (built from `Dockerfile`), a second runs Caddy as a reverse
+  proxy purely for automatic Let's Encrypt TLS. `Caddyfile` takes its
+  hostname from `$DOMAIN`, read from the same root `.env` that
+  docker-compose interpolates `${DOMAIN}` from and that `env_file: .env`
+  passes into the app container — one file, two consumers, don't split it.
+  SQLite must be pointed at `/app/data/app.db` (the persistent `app-data`
+  volume) via `DATABASE_URL` in that `.env`, not the default `./app.db`
+  (container-local, wiped on every `docker compose up --build`).
 - **`db.py`** — SQLAlchemy 2.0 models, `User` 1:1 `Subscription`, `User` 1:N
   `BackupCode`. Notable: `Subscription.is_active` is a computed `@property`
   derived from `current_period_end`, not a stored column — don't try to set
